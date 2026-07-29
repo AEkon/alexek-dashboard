@@ -1,5 +1,6 @@
 from fastapi import FastAPI, BackgroundTasks, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 import sqlite3
 import os
 from datetime import datetime, timedelta
@@ -9,6 +10,9 @@ from db import init_db, is_scraper_running, log_scrape_start, log_scrape_end
 from scrapers import squarespace_jobs
 
 app = FastAPI(title="Personal Dashboard API")
+
+# Mount static files for frontend
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Global database connection
 db: Optional[sqlite3.Connection] = None
@@ -361,6 +365,21 @@ async def update_task(task_id: int, updates: dict):
         return {"status": "updated"}
 
     return {"status": "no_changes"}
+
+# Serve frontend for all non-API routes
+@app.get("/{full_path:path}")
+async def serve_frontend(full_path: str):
+    """Serve the React frontend for all non-API routes."""
+    # Check if it's an API route
+    if full_path.startswith("api/") or full_path.startswith("health"):
+        raise HTTPException(status_code=404, detail="API endpoint not found")
+
+    # Serve index.html for all other routes (React client-side routing)
+    index_path = os.path.join("static", "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
+    else:
+        raise HTTPException(status_code=404, detail="Frontend not built")
 
 if __name__ == "__main__":
     import uvicorn
