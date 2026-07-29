@@ -37,11 +37,6 @@ async def shutdown():
     if db:
         db.close()
 
-@app.get("/")
-async def root():
-    """Root endpoint for basic connectivity test."""
-    return {"message": "Squarespace Job Dashboard API", "status": "running"}
-
 @app.get("/health")
 async def health():
     """Health check endpoint."""
@@ -371,7 +366,7 @@ async def update_task(task_id: int, updates: dict):
 async def serve_frontend(full_path: str):
     """Serve the React frontend for all non-API routes."""
     # Check if it's an API route
-    if full_path.startswith("api/") or full_path.startswith("health"):
+    if full_path.startswith("api/") or full_path == "health" or full_path.startswith("health"):
         raise HTTPException(status_code=404, detail="API endpoint not found")
 
     # Serve index.html for all other routes (React client-side routing)
