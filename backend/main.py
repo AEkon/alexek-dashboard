@@ -1,15 +1,23 @@
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
-from fastapi.responses import JSONResponse, FileResponse, Response
+from fastapi.responses import JSONResponse, FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 import sqlite3
 import os
-import base64
-import secrets
 from datetime import datetime, timedelta
 from typing import Optional
+from urllib.parse import quote
 
 from db import init_db, is_scraper_running, log_scrape_start, log_scrape_end
 from scrapers import squarespace_jobs
+from auth import (
+    COOKIE_NAME,
+    auth_configured,
+    auth_required_in_env,
+    credentials_valid,
+    create_session_token,
+    session_cookie_kwargs,
+    verify_session_token,
+)
 
 app = FastAPI(title="Personal Dashboard API")
 
@@ -21,53 +29,35 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 # Global database connection
 db: Optional[sqlite3.Connection] = None
 
-PUBLIC_PATHS = {"/health"}
-
-
-def _unauthorized() -> Response:
-    return Response(
-        content="Authentication required",
-        status_code=401,
-        headers={"WWW-Authenticate": 'Basic realm="Alexek HQ"'},
-        media_type="text/plain",
-    )
+PUBLIC_PATHS = {"/health", "/login", "/api/login"}
 
 
 @app.middleware("http")
 async def password_protect(request: Request, call_next):
-    """HTTP Basic Auth for the whole app except /health (Railway healthcheck)."""
+    """Cookie session auth; /health and /login stay public."""
     path = request.url.path.rstrip("/") or "/"
     if path in PUBLIC_PATHS or path == "/health":
         return await call_next(request)
 
-    expected_user = os.getenv("DASHBOARD_USERNAME", "admin")
-    expected_pass = os.getenv("DASHBOARD_PASSWORD", "")
-
-    if not expected_pass:
-        # Local/dev without a password stays open; Railway must set one.
-        if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
+    if not auth_configured():
+        if auth_required_in_env():
             return JSONResponse(
                 {"detail": "DASHBOARD_PASSWORD is not configured"},
                 status_code=503,
             )
         return await call_next(request)
 
-    header = request.headers.get("Authorization", "")
-    if not header.startswith("Basic "):
-        return _unauthorized()
+    user = verify_session_token(request.cookies.get(COOKIE_NAME))
+    if user:
+        return await call_next(request)
 
-    try:
-        decoded = base64.b64decode(header[6:]).decode("utf-8")
-        username, _, password = decoded.partition(":")
-    except Exception:
-        return _unauthorized()
+    if path.startswith("/api/"):
+        return JSONResponse({"detail": "Authentication required"}, status_code=401)
 
-    user_ok = secrets.compare_digest(username, expected_user)
-    pass_ok = secrets.compare_digest(password, expected_pass)
-    if not (user_ok and pass_ok):
-        return _unauthorized()
-
-    return await call_next(request)
+    next_url = request.url.path
+    if request.url.query:
+        next_url = f"{next_url}?{request.url.query}"
+    return RedirectResponse(url=f"/login?next={quote(next_url, safe='')}", status_code=303)
 
 @app.on_event("startup")
 async def startup():
@@ -93,6 +83,42 @@ async def shutdown():
 async def health():
     """Health check endpoint."""
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+
+@app.get("/login")
+async def login_page(request: Request):
+    """Serve the branded login page (no Basic Auth popup)."""
+    if auth_configured() and verify_session_token(request.cookies.get(COOKIE_NAME)):
+        return RedirectResponse(url="/", status_code=303)
+    login_path = os.path.join("static", "login.html")
+    if os.path.exists(login_path):
+        return FileResponse(login_path)
+    raise HTTPException(status_code=404, detail="Login page missing")
+
+@app.post("/api/login")
+async def api_login(payload: dict):
+    """Validate credentials and set an HttpOnly session cookie."""
+    if not auth_configured():
+        if auth_required_in_env():
+            raise HTTPException(status_code=503, detail="DASHBOARD_PASSWORD is not configured")
+        # Local without password: no-op success
+        return {"status": "ok"}
+
+    username = str(payload.get("username", ""))
+    password = str(payload.get("password", ""))
+    if not credentials_valid(username, password):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    token = create_session_token(username)
+    response = JSONResponse({"status": "ok"})
+    response.set_cookie(**session_cookie_kwargs(token))
+    return response
+
+@app.post("/api/logout")
+async def api_logout():
+    """Clear the session cookie."""
+    response = JSONResponse({"status": "ok"})
+    response.delete_cookie(COOKIE_NAME, path="/")
+    return response
 
 @app.get("/api/tasks")
 async def get_tasks():
@@ -435,6 +461,7 @@ async def serve_frontend(full_path: str):
         or full_path.startswith("static/")
         or full_path == "health"
         or full_path.startswith("health/")
+        or full_path == "login"
     ):
         raise HTTPException(status_code=404, detail="Not found")
 

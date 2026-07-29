@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sign in · Squarespace Job Monitor</title>
+    <!--
+      Served by backend/main.py GET /login (FileResponse).
+      No other login.html exists. Self-contained CSS matching App.css tokens.
+      User: "make the login ui match. i dont want a popup"
+    -->
+    <style>
+      :root {
+        --color-primary: #722f37;
+        --color-accent: #2a9d8f;
+        --color-bg: #faf0e6;
+        --color-text: #2c2c2c;
+        --color-border: #d4c4b0;
+      }
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        background:
+          radial-gradient(ellipse 80% 50% at 10% 0%, rgba(114, 47, 55, 0.08), transparent 55%),
+          radial-gradient(ellipse 60% 40% at 100% 100%, rgba(42, 157, 143, 0.1), transparent 50%),
+          var(--color-bg);
+        color: var(--color-text);
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 1.5rem;
+        line-height: 1.5;
+      }
+      .login { width: 100%; max-width: 420px; }
+      .login-brand {
+        color: var(--color-primary);
+        font-size: 1.75rem;
+        font-weight: 700;
+        margin-bottom: 0.35rem;
+      }
+      .login-rule {
+        height: 2px;
+        background: var(--color-primary);
+        margin-bottom: 1.25rem;
+        width: 100%;
+      }
+      .login-sub {
+        color: var(--color-text);
+        opacity: 0.75;
+        margin-bottom: 1.5rem;
+        font-size: 0.95rem;
+      }
+      .login-card {
+        background: #fff;
+        border: 1px solid var(--color-border);
+        border-radius: 6px;
+        padding: 1.5rem;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+      }
+      label {
+        display: block;
+        font-size: 0.875rem;
+        font-weight: 600;
+        margin-bottom: 0.35rem;
+        color: var(--color-primary);
+      }
+      .field { margin-bottom: 1rem; }
+      input {
+        width: 100%;
+        padding: 0.65rem 0.75rem;
+        border: 1px solid var(--color-border);
+        border-radius: 4px;
+        font-size: 1rem;
+        background: #fff;
+        color: var(--color-text);
+      }
+      input:focus {
+        outline: 2px solid var(--color-accent);
+        outline-offset: 1px;
+        border-color: var(--color-accent);
+      }
+      button {
+        width: 100%;
+        margin-top: 0.5rem;
+        background: var(--color-accent);
+        color: #fff;
+        border: none;
+        padding: 0.7rem 1rem;
+        border-radius: 4px;
+        font-size: 1rem;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:hover:not(:disabled) { background: #238b7d; }
+      button:disabled { opacity: 0.65; cursor: not-allowed; }
+      .error {
+        display: none;
+        margin-bottom: 1rem;
+        padding: 0.65rem 0.75rem;
+        background: #fdf2f2;
+        border: 1px solid #e8b4b8;
+        border-radius: 4px;
+        color: var(--color-primary);
+        font-size: 0.9rem;
+      }
+      .error.show { display: block; }
+    </style>
+  </head>
+  <body>
+    <main class="login">
+      <h1 class="login-brand">Squarespace Job Monitor</h1>
+      <div class="login-rule" aria-hidden="true"></div>
+      <p class="login-sub">Sign in to open your dashboard.</p>
+      <div class="login-card">
+        <div id="error" class="error" role="alert"></div>
+        <form id="login-form">
+          <div class="field">
+            <label for="username">Username</label>
+            <input id="username" name="username" autocomplete="username" required autofocus />
+          </div>
+          <div class="field">
+            <label for="password">Password</label>
+            <input id="password" name="password" type="password" autocomplete="current-password" required />
+          </div>
+          <button type="submit" id="submit">Sign in</button>
+        </form>
+      </div>
+    </main>
+    <script>
+      const form = document.getElementById("login-form");
+      const errorEl = document.getElementById("error");
+      const submit = document.getElementById("submit");
+      const params = new URLSearchParams(window.location.search);
+      const next = params.get("next") || "/";
+
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        errorEl.classList.remove("show");
+        errorEl.textContent = "";
+        submit.disabled = true;
+        submit.textContent = "Signing in…";
+        try {
+          const res = await fetch("/api/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "same-origin",
+            body: JSON.stringify({
+              username: document.getElementById("username").value,
+              password: document.getElementById("password").value,
+            }),
+          });
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            throw new Error(data.detail || "Invalid username or password");
+          }
+          window.location.href = next.startsWith("/") ? next : "/";
+        } catch (err) {
+          errorEl.textContent = err.message || "Sign in failed";
+          errorEl.classList.add("show");
+          submit.disabled = false;
+          submit.textContent = "Sign in";
+        }
+      });
+    </script>
+  </body>
+</html>

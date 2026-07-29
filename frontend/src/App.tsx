@@ -62,7 +62,11 @@ function App() {
       if (sourceFilter) params.append('source', sourceFilter)
       params.append('limit', '50')
 
-      const response = await fetch(`/api/jobs?${params.toString()}`)
+      const response = await fetch(`/api/jobs?${params.toString()}`, { credentials: 'same-origin' })
+      if (response.status === 401) {
+        window.location.href = '/login'
+        return
+      }
       if (!response.ok) throw new Error('Failed to fetch jobs')
 
       const data = await response.json()
@@ -89,7 +93,11 @@ function App() {
   const handleRefresh = async () => {
     setRefreshing(true)
     try {
-      await fetch('/api/refresh/jobs', { method: 'POST' })
+      const refreshRes = await fetch('/api/refresh/jobs', { method: 'POST', credentials: 'same-origin' })
+      if (refreshRes.status === 401) {
+        window.location.href = '/login'
+        return
+      }
 
       // Wait a moment for scraping, then fetch fresh data
       setTimeout(() => {
@@ -164,13 +172,24 @@ function App() {
     <div className="dashboard">
       <header className="dashboard-header">
         <h1>Squarespace Job Monitor</h1>
-        <button
-          className="refresh-button"
-          onClick={handleRefresh}
-          disabled={refreshing}
-        >
-          {refreshing ? '↻' : '⟳'} Refresh
-        </button>
+        <div className="header-actions">
+          <button
+            className="refresh-button"
+            onClick={handleRefresh}
+            disabled={refreshing}
+          >
+            {refreshing ? '↻' : '⟳'} Refresh
+          </button>
+          <button
+            className="logout-button"
+            onClick={async () => {
+              await fetch('/api/logout', { method: 'POST', credentials: 'same-origin' })
+              window.location.href = '/login'
+            }}
+          >
+            Sign out
+          </button>
+        </div>
       </header>
 
       {stats && (
