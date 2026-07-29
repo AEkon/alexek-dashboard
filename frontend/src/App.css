@@ -273,7 +273,7 @@ body {
   white-space: nowrap;
 }
 
-/* Action buttons */
+/* Action buttons — App.tsx triage UI. User: Implement triage plan. */
 .apply-button {
   display: inline-block;
   background-color: var(--color-accent);
@@ -289,6 +289,76 @@ body {
 
 .apply-button:hover {
   background-color: #238B7D;
+}
+
+.status-tabs {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
+.status-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: white;
+  border: 1px solid var(--color-border);
+  color: var(--color-text);
+  padding: 0.45rem 0.85rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+
+.status-tab:hover {
+  border-color: var(--color-accent);
+}
+
+.status-tab.active {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: white;
+}
+
+.status-tab-count {
+  font-size: 0.75rem;
+  opacity: 0.85;
+  font-weight: 600;
+}
+
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.triage-button {
+  background: white;
+  border: 1px solid var(--color-border);
+  color: var(--color-text);
+  padding: 0.35rem 0.6rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.triage-button:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.triage-button.triage-skip:hover {
+  border-color: var(--color-highlight);
+  color: var(--color-highlight);
+}
+
+.triage-button.triage-muted {
+  opacity: 0.75;
 }
 
 /* Responsive design */

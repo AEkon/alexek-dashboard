@@ -3,7 +3,7 @@
 Callers: backend/main.py refresh_jobs_background → scrape().
 APIs: Freelancer RSS; optional Upwork GraphQL via env.
 Schema: jobs (source, source_id, title, ...), scrape_log.
-User: "ok implement" (Freelancer RSS, drop Reddit, Upwork behind env).
+User: "Implement the plan" (job triage + lean DB).
 """
 import feedparser
 import httpx
@@ -13,7 +13,10 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import html
 
+from db import purge_stale_data
+
 USER_AGENT = "alexek-dashboard/1.0 (+https://hq.alexek.com)"
+DESCRIPTION_SNIPPET_LEN = 400
 
 # Phrase matches recorded as enrichment; bare "squarespace" is enough to include a job.
 SQUARESPACE_KEYWORDS = [
@@ -257,8 +260,67 @@ def upsert_job(
     budget_mid_usd: Optional[int] = None,
     effort_score: Optional[int] = None,
     priority_score: Optional[float] = None,
-) -> None:
+) -> bool:
+    """Insert or update a job. Preserves triage status. Returns True if a row was written."""
+    snippet = (description or "")[:DESCRIPTION_SNIPPET_LEN]
     now = datetime.utcnow().isoformat()
+
+    existing = db.execute(
+        """SELECT title, description, url, posted_date, job_type,
+                  rate_min, rate_max, currency, keyword_matches,
+                  budget, budget_mid_usd, effort_score, priority_score
+           FROM jobs WHERE source = ? AND source_id = ?""",
+        (source, source_id),
+    ).fetchone()
+
+    if existing:
+        same = (
+            existing["title"] == title
+            and (existing["description"] or "") == snippet
+            and existing["url"] == url
+            and existing["posted_date"] == posted_date
+            and existing["job_type"] == job_type
+            and existing["rate_min"] == rate_min
+            and existing["rate_max"] == rate_max
+            and (existing["currency"] or "USD") == currency
+            and (existing["keyword_matches"] or "") == (keyword_matches or "")
+            and (existing["budget"] or None) == budget
+            and existing["budget_mid_usd"] == budget_mid_usd
+            and existing["effort_score"] == effort_score
+            and existing["priority_score"] == priority_score
+        )
+        if same:
+            return False
+
+        # Never overwrite triage status on scrape updates
+        db.execute(
+            """UPDATE jobs SET
+                title = ?, description = ?, url = ?, posted_date = ?, job_type = ?,
+                rate_min = ?, rate_max = ?, currency = ?, keyword_matches = ?,
+                budget = ?, budget_mid_usd = ?, effort_score = ?, priority_score = ?,
+                updated_at = ?
+               WHERE source = ? AND source_id = ?""",
+            (
+                title,
+                snippet,
+                url,
+                posted_date,
+                job_type,
+                rate_min,
+                rate_max,
+                currency,
+                keyword_matches,
+                budget,
+                budget_mid_usd,
+                effort_score,
+                priority_score,
+                now,
+                source,
+                source_id,
+            ),
+        )
+        return True
+
     db.execute(
         """
         INSERT INTO jobs (
@@ -267,28 +329,12 @@ def upsert_job(
             budget, budget_mid_usd, effort_score, priority_score
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(source, source_id) DO UPDATE SET
-            title = excluded.title,
-            description = excluded.description,
-            url = excluded.url,
-            posted_date = excluded.posted_date,
-            job_type = excluded.job_type,
-            rate_min = CASE WHEN excluded.rate_min > 0 THEN excluded.rate_min ELSE rate_min END,
-            rate_max = CASE WHEN excluded.rate_max > 0 THEN excluded.rate_max ELSE rate_max END,
-            currency = excluded.currency,
-            keyword_matches = excluded.keyword_matches,
-            budget = excluded.budget,
-            budget_mid_usd = CASE WHEN excluded.budget_mid_usd > 0 THEN excluded.budget_mid_usd ELSE budget_mid_usd END,
-            effort_score = excluded.effort_score,
-            priority_score = excluded.priority_score,
-            updated_at = excluded.updated_at,
-            status = CASE WHEN status = 'archived' THEN 'archived' ELSE excluded.status END
         """,
         (
             source,
             source_id,
             title,
-            description,
+            snippet,
             url,
             posted_date,
             job_type,
@@ -305,6 +351,7 @@ def upsert_job(
             priority_score,
         ),
     )
+    return True
 
 
 async def scrape_freelancer_rss(db) -> int:
@@ -355,12 +402,12 @@ async def scrape_freelancer_rss(db) -> int:
         else:
             source_id = re.sub(r"[^\w-]", "", link.rstrip("/").split("/")[-1])[:80] or link[-50:]
 
-        upsert_job(
+        if upsert_job(
             db,
             source="freelancer",
             source_id=source_id,
             title=title,
-            description=description[:2000],
+            description=description,
             url=link,
             posted_date=posted_date,
             job_type=job_type,
@@ -372,8 +419,8 @@ async def scrape_freelancer_rss(db) -> int:
             budget_mid_usd=mid_usd,
             effort_score=effort,
             priority_score=priority,
-        )
-        rows += 1
+        ):
+            rows += 1
 
     db.commit()
     return rows
@@ -478,12 +525,12 @@ async def scrape_upwork_graphql(db) -> int:
         priority = compute_priority(mid_usd, effort)
         job_type = "short-term" if is_short_term_job(title, description) or effort <= 3 else "unknown"
 
-        upsert_job(
+        if upsert_job(
             db,
             source="upwork",
             source_id=job_id[:80],
             title=title,
-            description=description[:2000],
+            description=description,
             url=url,
             posted_date=posted_date,
             job_type=job_type,
@@ -495,8 +542,8 @@ async def scrape_upwork_graphql(db) -> int:
             budget_mid_usd=mid_usd,
             effort_score=effort,
             priority_score=priority,
-        )
-        rows += 1
+        ):
+            rows += 1
 
     db.commit()
     return rows
@@ -549,4 +596,5 @@ async def scrape(db) -> Tuple[int, Optional[str]]:
     if total == 0 and errors and int(results.get("freelancer") or 0) == 0:
         raise Exception(error_msg or "All job sources failed")
 
+    purge_stale_data(db)
     return total, error_msg

@@ -280,11 +280,19 @@ async def refresh_posts_background(conn: sqlite3.Connection):
     except Exception as e:
         log_scrape_end(conn, log_id, "failed", error=str(e))
 
+ALLOWED_JOB_STATUSES = {"new", "interested", "applied", "skipped", "archived"}
+
+
 @app.get("/api/jobs")
 async def get_jobs(job_type: Optional[str] = None, status: str = "new", limit: int = 50, source: Optional[str] = None):
-    """Get Squarespace jobs with optional filtering."""
+    """Get Squarespace jobs with optional filtering.
+    Callers: frontend App.tsx. Schema: jobs.status. User: Implement triage plan.
+    """
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
+
+    if status not in ALLOWED_JOB_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Invalid status. Allowed: {sorted(ALLOWED_JOB_STATUSES)}")
 
     # Build query with filters
     where_conditions = ["status = ?"]
@@ -315,19 +323,22 @@ async def get_jobs(job_type: Optional[str] = None, status: str = "new", limit: i
     return [dict(job) for job in jobs]
 
 @app.get("/api/jobs/search")
-async def search_jobs(q: str, limit: int = 50):
+async def search_jobs(q: str, status: str = "new", limit: int = 50):
     """Search jobs by keywords in title or description."""
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
+    if status not in ALLOWED_JOB_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Invalid status. Allowed: {sorted(ALLOWED_JOB_STATUSES)}")
+
     search_pattern = f"%{q}%"
     jobs = db.execute(
         """SELECT * FROM jobs
-           WHERE status = 'new'
+           WHERE status = ?
            AND (title LIKE ? OR description LIKE ? OR keyword_matches LIKE ?)
            ORDER BY posted_date DESC
            LIMIT ?""",
-        (search_pattern, search_pattern, search_pattern, limit)
+        (status, search_pattern, search_pattern, search_pattern, limit)
     ).fetchall()
 
     return [dict(job) for job in jobs]
@@ -343,8 +354,16 @@ async def update_job(job_id: int, updates: dict):
     values = []
 
     for key, value in updates.items():
-        if key in ["status", "job_type"]:
-            set_clauses.append(f"{key} = ?")
+        if key == "status":
+            if value not in ALLOWED_JOB_STATUSES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid status. Allowed: {sorted(ALLOWED_JOB_STATUSES)}",
+                )
+            set_clauses.append("status = ?")
+            values.append(value)
+        elif key == "job_type":
+            set_clauses.append("job_type = ?")
             values.append(value)
 
     if set_clauses:

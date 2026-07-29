@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react'
 
-// Types for our job data
+// Callers: main.tsx. API: GET/PATCH /api/jobs, /api/jobs/stats. Schema: jobs.status.
+// User: "Implement the plan as specified" (job triage + lean DB).
+
 interface Job {
   id: number
   source: string
@@ -30,27 +32,34 @@ interface JobsStats {
   recent_7days: number
 }
 
+type TriageStatus = 'new' | 'interested' | 'applied' | 'skipped'
+
+const STATUS_TABS: { key: TriageStatus; label: string }[] = [
+  { key: 'new', label: 'New' },
+  { key: 'interested', label: 'Interested' },
+  { key: 'applied', label: 'Applied' },
+  { key: 'skipped', label: 'Skipped' },
+]
+
 function App() {
   const [jobs, setJobs] = useState<Job[]>([])
   const [stats, setStats] = useState<JobsStats | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [statusFilter, setStatusFilter] = useState<TriageStatus>('new')
 
-  // Filter states
   const [jobTypeFilter, setJobTypeFilter] = useState<string | null>(null)
   const [sourceFilter, setSourceFilter] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
 
-  // Sort states
   const [sortKey, setSortKey] = useState('priority_score')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
 
-  // Fetch jobs on mount
   useEffect(() => {
     fetchJobs()
     fetchStats()
-  }, [])
+  }, [statusFilter, jobTypeFilter, sourceFilter])
 
   const fetchJobs = async () => {
     try {
@@ -58,6 +67,7 @@ function App() {
       setError(null)
 
       const params = new URLSearchParams()
+      params.append('status', statusFilter)
       if (jobTypeFilter) params.append('job_type', jobTypeFilter)
       if (sourceFilter) params.append('source', sourceFilter)
       params.append('limit', '50')
@@ -80,13 +90,33 @@ function App() {
 
   const fetchStats = async () => {
     try {
-      const response = await fetch('/api/jobs/stats')
+      const response = await fetch('/api/jobs/stats', { credentials: 'same-origin' })
       if (!response.ok) throw new Error('Failed to fetch stats')
 
       const data = await response.json()
       setStats(data)
     } catch (err) {
       console.error('Failed to fetch stats:', err)
+    }
+  }
+
+  const setJobStatus = async (jobId: number, status: TriageStatus) => {
+    try {
+      const response = await fetch(`/api/jobs/${jobId}`, {
+        method: 'PATCH',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status }),
+      })
+      if (response.status === 401) {
+        window.location.href = '/login'
+        return
+      }
+      if (!response.ok) throw new Error('Failed to update job')
+      setJobs(prev => prev.filter(j => j.id !== jobId))
+      fetchStats()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update job')
     }
   }
 
@@ -99,7 +129,6 @@ function App() {
         return
       }
 
-      // Wait a moment for scraping, then fetch fresh data
       setTimeout(() => {
         fetchJobs()
         fetchStats()
@@ -116,7 +145,6 @@ function App() {
       setSortDir(sortDir === 'asc' ? 'desc' : 'asc')
     } else {
       setSortKey(key)
-      // Numeric value metrics default high→low
       setSortDir(['priority_score', 'budget_mid_usd', 'effort_score', 'rate_min', 'posted_date'].includes(key) ? 'desc' : 'asc')
     }
   }
@@ -139,15 +167,48 @@ function App() {
     return `${score} high`
   }
 
-  // Filter and sort jobs
+  const triageActions = (job: Job) => {
+    switch (job.status as TriageStatus) {
+      case 'new':
+        return (
+          <>
+            <button type="button" className="triage-button" onClick={() => setJobStatus(job.id, 'interested')}>Interested</button>
+            <button type="button" className="triage-button" onClick={() => setJobStatus(job.id, 'applied')}>Applied</button>
+            <button type="button" className="triage-button triage-skip" onClick={() => setJobStatus(job.id, 'skipped')}>Skip</button>
+          </>
+        )
+      case 'interested':
+        return (
+          <>
+            <button type="button" className="triage-button" onClick={() => setJobStatus(job.id, 'applied')}>Applied</button>
+            <button type="button" className="triage-button triage-skip" onClick={() => setJobStatus(job.id, 'skipped')}>Skip</button>
+            <button type="button" className="triage-button triage-muted" onClick={() => setJobStatus(job.id, 'new')}>Back to New</button>
+          </>
+        )
+      case 'applied':
+        return (
+          <>
+            <button type="button" className="triage-button triage-skip" onClick={() => setJobStatus(job.id, 'skipped')}>Skip</button>
+            <button type="button" className="triage-button triage-muted" onClick={() => setJobStatus(job.id, 'interested')}>Back to Interested</button>
+          </>
+        )
+      case 'skipped':
+        return (
+          <button type="button" className="triage-button" onClick={() => setJobStatus(job.id, 'new')}>Restore</button>
+        )
+      default:
+        return null
+    }
+  }
+
   const filteredJobs = jobs
     .filter(job => {
       if (searchQuery) {
         const query = searchQuery.toLowerCase()
         return (
           job.title.toLowerCase().includes(query) ||
-          job.description.toLowerCase().includes(query) ||
-          job.keyword_matches.toLowerCase().includes(query)
+          (job.description || '').toLowerCase().includes(query) ||
+          (job.keyword_matches || '').toLowerCase().includes(query)
         )
       }
       return true
@@ -164,7 +225,6 @@ function App() {
       return sortDir === 'asc' ? comparison : -comparison
     })
 
-  // Extract unique values for filters
   const jobTypes = [...new Set(jobs.map(j => j.job_type).filter(Boolean))]
   const sources = [...new Set(jobs.map(j => j.source).filter(Boolean))]
 
@@ -196,18 +256,32 @@ function App() {
         <div className="stats-row">
           <div className="stat-card">
             <div className="stat-value">{stats.by_status.new || 0}</div>
-            <div className="stat-label">New Jobs</div>
+            <div className="stat-label">New</div>
           </div>
           <div className="stat-card">
-            <div className="stat-value">{stats.by_type['short-term'] || 0}</div>
-            <div className="stat-label">Short-Term</div>
+            <div className="stat-value">{stats.by_status.interested || 0}</div>
+            <div className="stat-label">Interested</div>
           </div>
           <div className="stat-card">
-            <div className="stat-value">{stats.recent_7days}</div>
-            <div className="stat-label">Last 7 Days</div>
+            <div className="stat-value">{stats.by_status.applied || 0}</div>
+            <div className="stat-label">Applied</div>
           </div>
         </div>
       )}
+
+      <div className="status-tabs">
+        {STATUS_TABS.map(tab => (
+          <button
+            key={tab.key}
+            type="button"
+            className={`status-tab ${statusFilter === tab.key ? 'active' : ''}`}
+            onClick={() => setStatusFilter(tab.key)}
+          >
+            {tab.label}
+            <span className="status-tab-count">{stats?.by_status[tab.key] || 0}</span>
+          </button>
+        ))}
+      </div>
 
       <div className="controls">
         <input
@@ -307,14 +381,17 @@ function App() {
                   <td>{job.source}</td>
                   <td>{new Date(job.posted_date).toLocaleDateString()}</td>
                   <td>
-                    <a
-                      href={job.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="apply-button"
-                    >
-                      View
-                    </a>
+                    <div className="row-actions">
+                      <a
+                        href={job.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="apply-button"
+                      >
+                        View
+                      </a>
+                      {triageActions(job)}
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -324,7 +401,7 @@ function App() {
           {filteredJobs.length === 0 && (
             <div className="no-results">
               {jobs.length === 0
-                ? 'No jobs yet. Click Refresh to pull Freelancer Squarespace listings.'
+                ? `No ${statusFilter} jobs. Click Refresh to pull Freelancer Squarespace listings.`
                 : 'No jobs match your filters or search. Clear them to see all results.'}
             </div>
           )}

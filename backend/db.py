@@ -1,6 +1,8 @@
+# Callers: main.py, scrapers/squarespace_jobs.py (purge_stale_data).
+# Schema: jobs, scrape_log. User: "Implement the plan" (job triage + lean DB).
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 def default_db_path() -> str:
@@ -157,6 +159,39 @@ def log_scrape_end(conn: sqlite3.Connection, log_id: int, status: str, rows_affe
         (datetime.utcnow().isoformat(), status, rows_affected, error, log_id)
     )
     conn.commit()
+
+def purge_stale_data(conn: sqlite3.Connection) -> None:
+    """Drop stale inbox/discarded jobs and cap scrape_log to keep the volume small."""
+    new_days = int(os.getenv("JOB_RETENTION_NEW_DAYS", "21"))
+    discard_days = int(os.getenv("JOB_RETENTION_DISCARD_DAYS", "7"))
+    log_keep = int(os.getenv("SCRAPE_LOG_KEEP", "48"))
+
+    cutoff_new = (datetime.utcnow() - timedelta(days=new_days)).isoformat()
+    cutoff_discard = (datetime.utcnow() - timedelta(days=discard_days)).isoformat()
+
+    conn.execute(
+        "DELETE FROM jobs WHERE status = 'new' AND posted_date < ?",
+        (cutoff_new,),
+    )
+    conn.execute(
+        """DELETE FROM jobs
+           WHERE status IN ('skipped', 'archived')
+             AND COALESCE(updated_at, created_at) < ?""",
+        (cutoff_discard,),
+    )
+    conn.execute(
+        """DELETE FROM scrape_log
+           WHERE id NOT IN (
+             SELECT id FROM scrape_log ORDER BY id DESC LIMIT ?
+           )""",
+        (log_keep,),
+    )
+    conn.commit()
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.Error:
+        pass
+
 
 def is_scraper_running(conn: sqlite3.Connection, scraper_name: str) -> bool:
     """Check if a scraper is currently running."""
