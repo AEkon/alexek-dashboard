@@ -1,8 +1,8 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { buildProposalStub } from './proposal'
 
-// Callers: main.tsx. API: GET/PATCH /api/jobs, /api/jobs/stats.
-// User: "Implement the plan as specified" (Apply assist).
+// Callers: main.tsx. API: GET/PATCH /api/jobs, /api/jobs/stats, /api/scrape-log.
+// User: "do them all" (UI improvements before alerts).
 
 interface Job {
   id: number
@@ -36,6 +36,7 @@ interface JobsStats {
 type JobStatus = 'new' | 'interested' | 'applied' | 'skipped' | 'won' | 'lost' | 'no_reply'
 type TabKey = 'new' | 'interested' | 'applied' | 'closed' | 'skipped'
 type OutcomeFilter = 'won' | 'lost' | 'no_reply'
+type Density = 'comfortable' | 'compact'
 
 const STATUS_TABS: { key: TabKey; label: string }[] = [
   { key: 'new', label: 'New' },
@@ -53,6 +54,14 @@ const OUTCOME_PILLS: { key: OutcomeFilter; label: string }[] = [
 
 const CLOSED_STATUSES: OutcomeFilter[] = ['won', 'lost', 'no_reply']
 
+const EMPTY_COPY: Record<TabKey, string> = {
+  new: 'No new jobs. Click Refresh to pull Freelancer Squarespace listings.',
+  interested: 'Nothing shortlisted yet — Shortlist jobs from New, or press I on a focused row.',
+  applied: 'No open bids. Use Apply on New/Interested, then track outcomes here.',
+  closed: 'No outcomes yet — mark Applied jobs Won, Lost, or No reply when you hear back.',
+  skipped: 'No skipped jobs. Skipped items are purged after a week.',
+}
+
 function tabCount(stats: JobsStats | null, key: TabKey): number {
   if (!stats) return 0
   if (key === 'closed') {
@@ -66,6 +75,37 @@ function outcomeLabel(status: string): string {
   if (status === 'won') return 'Won'
   if (status === 'lost') return 'Lost'
   return status
+}
+
+function winRate(stats: JobsStats | null): string | null {
+  if (!stats) return null
+  const won = stats.by_status.won || 0
+  const lost = stats.by_status.lost || 0
+  const noReply = stats.by_status.no_reply || 0
+  const closed = won + lost + noReply
+  if (closed === 0) return null
+  return `${Math.round((won / closed) * 100)}% win rate`
+}
+
+function formatRelativeTime(iso: string | null): string {
+  if (!iso) return 'Never scraped'
+  const then = new Date(iso).getTime()
+  if (Number.isNaN(then)) return 'Unknown'
+  const mins = Math.max(0, Math.round((Date.now() - then) / 60000))
+  if (mins < 1) return 'Updated just now'
+  if (mins < 60) return `Updated ${mins}m ago`
+  const hours = Math.round(mins / 60)
+  if (hours < 48) return `Updated ${hours}h ago`
+  const days = Math.round(hours / 24)
+  return `Updated ${days}d ago`
+}
+
+function loadDensity(): Density {
+  try {
+    const v = localStorage.getItem('dashboard-density')
+    if (v === 'compact' || v === 'comfortable') return v
+  } catch { /* ignore */ }
+  return 'comfortable'
 }
 
 function App() {
@@ -89,10 +129,27 @@ function App() {
   const [copied, setCopied] = useState(false)
   const [markingApplied, setMarkingApplied] = useState(false)
 
+  const [focusedIndex, setFocusedIndex] = useState(0)
+  const [expandedId, setExpandedId] = useState<number | null>(null)
+  const [lastScrapedAt, setLastScrapedAt] = useState<string | null>(null)
+  const [density, setDensity] = useState<Density>(loadDensity)
+
   useEffect(() => {
     fetchJobs()
     fetchStats()
+    fetchLastScraped()
   }, [statusFilter, outcomeFilter, jobTypeFilter, sourceFilter])
+
+  useEffect(() => {
+    setFocusedIndex(0)
+    setExpandedId(null)
+  }, [statusFilter, outcomeFilter, jobTypeFilter, sourceFilter, searchQuery])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('dashboard-density', density)
+    } catch { /* ignore */ }
+  }, [density])
 
   const fetchJobs = async () => {
     try {
@@ -126,15 +183,33 @@ function App() {
     try {
       const response = await fetch('/api/jobs/stats', { credentials: 'same-origin' })
       if (!response.ok) throw new Error('Failed to fetch stats')
-
-      const data = await response.json()
-      setStats(data)
+      setStats(await response.json())
     } catch (err) {
       console.error('Failed to fetch stats:', err)
     }
   }
 
-  const setJobStatus = async (jobId: number, status: JobStatus) => {
+  const fetchLastScraped = async () => {
+    try {
+      const response = await fetch('/api/scrape-log', { credentials: 'same-origin' })
+      if (!response.ok) return
+      const logs: Array<{ scraper: string; status: string; finished_at: string | null; started_at: string }> =
+        await response.json()
+      const latest = logs.find(l => l.scraper === 'jobs' && l.status === 'success')
+      setLastScrapedAt(latest?.finished_at || latest?.started_at || null)
+    } catch {
+      /* non-critical */
+    }
+  }
+
+  const closeApplyDrawer = useCallback(() => {
+    setApplyJob(null)
+    setProposalText('')
+    setCopied(false)
+    setMarkingApplied(false)
+  }, [])
+
+  const setJobStatus = useCallback(async (jobId: number, status: JobStatus) => {
     try {
       const response = await fetch(`/api/jobs/${jobId}`, {
         method: 'PATCH',
@@ -149,24 +224,17 @@ function App() {
       if (!response.ok) throw new Error('Failed to update job')
       setJobs(prev => prev.filter(j => j.id !== jobId))
       fetchStats()
-      if (applyJob?.id === jobId) closeApplyDrawer()
+      setApplyJob(prev => (prev?.id === jobId ? null : prev))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to update job')
     }
-  }
+  }, [])
 
-  const openApplyDrawer = (job: Job) => {
+  const openApplyDrawer = useCallback((job: Job) => {
     setApplyJob(job)
     setProposalText(buildProposalStub(job))
     setCopied(false)
-  }
-
-  const closeApplyDrawer = () => {
-    setApplyJob(null)
-    setProposalText('')
-    setCopied(false)
-    setMarkingApplied(false)
-  }
+  }, [])
 
   const copyProposal = async () => {
     try {
@@ -197,9 +265,10 @@ function App() {
       setTimeout(() => {
         fetchJobs()
         fetchStats()
+        fetchLastScraped()
         setRefreshing(false)
       }, 3000)
-    } catch (err) {
+    } catch {
       setError('Failed to refresh jobs')
       setRefreshing(false)
     }
@@ -231,6 +300,108 @@ function App() {
     if (score <= 6) return `${score} mid`
     return `${score} high`
   }
+
+  const filteredJobs = jobs
+    .filter(job => {
+      if (searchQuery) {
+        const query = searchQuery.toLowerCase()
+        return (
+          job.title.toLowerCase().includes(query) ||
+          (job.description || '').toLowerCase().includes(query) ||
+          (job.keyword_matches || '').toLowerCase().includes(query)
+        )
+      }
+      return true
+    })
+    .sort((a, b) => {
+      const aValue = a[sortKey as keyof Job]
+      const bValue = b[sortKey as keyof Job]
+
+      if (aValue === null) return 1
+      if (bValue === null) return -1
+      if (aValue === bValue) return 0
+
+      const comparison = aValue < bValue ? -1 : 1
+      return sortDir === 'asc' ? comparison : -comparison
+    })
+
+  useEffect(() => {
+    if (focusedIndex >= filteredJobs.length) {
+      setFocusedIndex(Math.max(0, filteredJobs.length - 1))
+    }
+  }, [filteredJobs.length, focusedIndex])
+
+  const focusedJob = filteredJobs[focusedIndex] || null
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null
+      const tag = target?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable) return
+      if (applyJob && e.key === 'Escape') {
+        e.preventDefault()
+        closeApplyDrawer()
+        return
+      }
+      if (applyJob) return
+      if (!filteredJobs.length) return
+
+      if (e.key === 'j' || e.key === 'ArrowDown') {
+        e.preventDefault()
+        setFocusedIndex(i => Math.min(filteredJobs.length - 1, i + 1))
+        return
+      }
+      if (e.key === 'k' || e.key === 'ArrowUp') {
+        e.preventDefault()
+        setFocusedIndex(i => Math.max(0, i - 1))
+        return
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault()
+        if (!focusedJob) return
+        setExpandedId(id => (id === focusedJob.id ? null : focusedJob.id))
+        return
+      }
+      if (!focusedJob) return
+
+      const status = focusedJob.status as JobStatus
+      if (e.key === 'a' || e.key === 'A') {
+        if (status === 'new' || status === 'interested') {
+          e.preventDefault()
+          openApplyDrawer(focusedJob)
+        }
+        return
+      }
+      if (e.key === 'i' || e.key === 'I') {
+        if (status === 'new') {
+          e.preventDefault()
+          setJobStatus(focusedJob.id, 'interested')
+        }
+        return
+      }
+      if (e.key === 's' || e.key === 'S') {
+        if (status === 'new' || status === 'interested' || status === 'applied') {
+          e.preventDefault()
+          setJobStatus(focusedJob.id, 'skipped')
+        }
+        return
+      }
+      if (status === 'applied') {
+        if (e.key === '1') {
+          e.preventDefault()
+          setJobStatus(focusedJob.id, 'won')
+        } else if (e.key === '2') {
+          e.preventDefault()
+          setJobStatus(focusedJob.id, 'lost')
+        } else if (e.key === '3') {
+          e.preventDefault()
+          setJobStatus(focusedJob.id, 'no_reply')
+        }
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [applyJob, filteredJobs, focusedJob, closeApplyDrawer, openApplyDrawer, setJobStatus])
 
   const triageActions = (job: Job) => {
     switch (job.status as JobStatus) {
@@ -279,38 +450,67 @@ function App() {
     }
   }
 
-  const filteredJobs = jobs
-    .filter(job => {
-      if (searchQuery) {
-        const query = searchQuery.toLowerCase()
-        return (
-          job.title.toLowerCase().includes(query) ||
-          (job.description || '').toLowerCase().includes(query) ||
-          (job.keyword_matches || '').toLowerCase().includes(query)
-        )
-      }
-      return true
-    })
-    .sort((a, b) => {
-      const aValue = a[sortKey as keyof Job]
-      const bValue = b[sortKey as keyof Job]
+  const scoreBreakdown = (job: Job) => (
+    <div className="job-preview">
+      <p className="job-preview-description">
+        {job.description?.trim() || 'No description snippet stored.'}
+      </p>
+      <dl className="score-breakdown">
+        <div>
+          <dt>Priority</dt>
+          <dd>{job.priority_score ?? '—'}</dd>
+        </div>
+        <div>
+          <dt>Budget mid</dt>
+          <dd>{job.budget_mid_usd != null ? `$${job.budget_mid_usd}` : formatBudget(job)}</dd>
+        </div>
+        <div>
+          <dt>Effort</dt>
+          <dd>{effortLabel(job.effort_score)}</dd>
+        </div>
+        <div>
+          <dt>Type</dt>
+          <dd>{job.job_type || '—'}</dd>
+        </div>
+      </dl>
+      {job.keyword_matches && (
+        <p className="job-preview-keywords">Keywords: {job.keyword_matches}</p>
+      )}
+    </div>
+  )
 
-      if (aValue === null) return 1
-      if (bValue === null) return -1
-      if (aValue === bValue) return 0
-
-      const comparison = aValue < bValue ? -1 : 1
-      return sortDir === 'asc' ? comparison : -comparison
-    })
+  const renderJobMeta = (job: Job) => (
+    <>
+      <span className="rate">{formatBudget(job)}</span>
+      <span className="meta-sep">·</span>
+      <span>{effortLabel(job.effort_score)}</span>
+      <span className="meta-sep">·</span>
+      <span>{job.source}</span>
+      <span className="meta-sep">·</span>
+      <span>{new Date(job.posted_date).toLocaleDateString()}</span>
+    </>
+  )
 
   const jobTypes = [...new Set(jobs.map(j => j.job_type).filter(Boolean))]
   const sources = [...new Set(jobs.map(j => j.source).filter(Boolean))]
+  const closedWinRate = winRate(stats)
 
   return (
-    <div className="dashboard">
-      <header className="dashboard-header">
-        <h1>Squarespace Job Monitor</h1>
+    <div className={`dashboard density-${density}`}>
+      <header className="dashboard-header sticky-header">
+        <div className="header-titles">
+          <h1>Squarespace Job Monitor</h1>
+          <p className="scrape-status">{formatRelativeTime(lastScrapedAt)}</p>
+        </div>
         <div className="header-actions">
+          <button
+            type="button"
+            className="density-toggle"
+            onClick={() => setDensity(d => (d === 'comfortable' ? 'compact' : 'comfortable'))}
+            title="Toggle row density"
+          >
+            {density === 'comfortable' ? 'Compact' : 'Comfortable'}
+          </button>
           <button
             className="refresh-button"
             onClick={handleRefresh}
@@ -353,7 +553,14 @@ function App() {
             )
           })}
         </div>
+        {statusFilter === 'closed' && closedWinRate && (
+          <span className="win-rate-chip">{closedWinRate}</span>
+        )}
       </div>
+
+      <p className="keyboard-hint">
+        Focus: ↑↓ or J/K · Enter preview · A apply · I shortlist · S skip · Applied: 1 won · 2 lost · 3 no reply
+      </p>
 
       <div className="controls">
         <input
@@ -418,89 +625,160 @@ function App() {
       {loading ? (
         <div className="loading">Loading jobs...</div>
       ) : (
-        <div className="jobs-table-container">
-          <table className="jobs-table">
-            <thead>
-              <tr>
-                <th onClick={() => toggleSort('priority_score')} className="sortable">
-                  Score {sortKey === 'priority_score' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
-                </th>
-                <th onClick={() => toggleSort('title')} className="sortable">
-                  Title {sortKey === 'title' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
-                </th>
-                <th onClick={() => toggleSort('budget_mid_usd')} className="sortable">
-                  Budget {sortKey === 'budget_mid_usd' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
-                </th>
-                <th onClick={() => toggleSort('effort_score')} className="sortable">
-                  Effort {sortKey === 'effort_score' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
-                </th>
-                <th onClick={() => toggleSort('source')} className="sortable">
-                  Source {sortKey === 'source' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
-                </th>
-                <th onClick={() => toggleSort('posted_date')} className="sortable">
-                  Posted {sortKey === 'posted_date' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
-                </th>
-                <th className="actions-col">Triage</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredJobs.map(job => (
-                <tr key={job.id} className={applyJob?.id === job.id ? 'row-active' : undefined}>
-                  <td className="score-cell">
-                    {job.priority_score != null ? (
-                      <span className="score">{job.priority_score}</span>
-                    ) : (
-                      <span className="rate-unknown">—</span>
-                    )}
-                  </td>
-                  <td className="job-title">
-                    <div className="job-title-row">
-                      <span>{job.title}</span>
-                      {CLOSED_STATUSES.includes(job.status as OutcomeFilter) && (
-                        <span className={`outcome-badge outcome-badge--${job.status}`}>
-                          {outcomeLabel(job.status)}
-                        </span>
-                      )}
-                    </div>
-                    {job.description && (
-                      <div className="job-description">
-                        {job.description.substring(0, 100)}
-                        {job.description.length > 100 && '...'}
-                      </div>
-                    )}
-                  </td>
-                  <td>
-                    <span className="rate">{formatBudget(job)}</span>
-                  </td>
-                  <td>{effortLabel(job.effort_score)}</td>
-                  <td>{job.source}</td>
-                  <td>{new Date(job.posted_date).toLocaleDateString()}</td>
-                  <td className="actions-cell">
-                    <div className="row-actions">
-                      <a
-                        href={job.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="view-link"
-                      >
-                        Open
-                      </a>
-                      {triageActions(job)}
-                    </div>
-                  </td>
+        <>
+          <div className="jobs-table-container desktop-only">
+            <table className="jobs-table">
+              <thead>
+                <tr>
+                  <th onClick={() => toggleSort('priority_score')} className="sortable">
+                    Score {sortKey === 'priority_score' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
+                  </th>
+                  <th onClick={() => toggleSort('title')} className="sortable">
+                    Title {sortKey === 'title' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
+                  </th>
+                  <th onClick={() => toggleSort('budget_mid_usd')} className="sortable">
+                    Budget {sortKey === 'budget_mid_usd' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
+                  </th>
+                  <th onClick={() => toggleSort('effort_score')} className="sortable">
+                    Effort {sortKey === 'effort_score' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
+                  </th>
+                  <th onClick={() => toggleSort('source')} className="sortable">
+                    Source {sortKey === 'source' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
+                  </th>
+                  <th onClick={() => toggleSort('posted_date')} className="sortable">
+                    Posted {sortKey === 'posted_date' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
+                  </th>
+                  <th className="actions-col">Triage</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {filteredJobs.map((job, index) => {
+                  const focused = index === focusedIndex
+                  const expanded = expandedId === job.id
+                  return (
+                    <tr
+                      key={job.id}
+                      className={[
+                        focused ? 'row-focused' : '',
+                        applyJob?.id === job.id ? 'row-active' : '',
+                        expanded ? 'row-expanded' : '',
+                      ].filter(Boolean).join(' ') || undefined}
+                      onClick={() => setFocusedIndex(index)}
+                    >
+                      <td className="score-cell">
+                        {job.priority_score != null ? (
+                          <span className="score">{job.priority_score}</span>
+                        ) : (
+                          <span className="rate-unknown">—</span>
+                        )}
+                      </td>
+                      <td className="job-title">
+                        <div className="job-title-row">
+                          <button
+                            type="button"
+                            className="title-expand"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setFocusedIndex(index)
+                              setExpandedId(id => (id === job.id ? null : job.id))
+                            }}
+                          >
+                            {job.title}
+                          </button>
+                          {CLOSED_STATUSES.includes(job.status as OutcomeFilter) && (
+                            <span className={`outcome-badge outcome-badge--${job.status}`}>
+                              {outcomeLabel(job.status)}
+                            </span>
+                          )}
+                        </div>
+                        {!expanded && job.description && (
+                          <div className="job-description">
+                            {job.description.substring(0, 100)}
+                            {job.description.length > 100 && '...'}
+                          </div>
+                        )}
+                        {expanded && scoreBreakdown(job)}
+                      </td>
+                      <td>
+                        <span className="rate">{formatBudget(job)}</span>
+                      </td>
+                      <td>{effortLabel(job.effort_score)}</td>
+                      <td>{job.source}</td>
+                      <td>{new Date(job.posted_date).toLocaleDateString()}</td>
+                      <td className="actions-cell" onClick={(e) => e.stopPropagation()}>
+                        <div className="row-actions">
+                          <a
+                            href={job.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="view-link"
+                          >
+                            Open
+                          </a>
+                          {triageActions(job)}
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="jobs-cards mobile-only">
+            {filteredJobs.map((job, index) => {
+              const focused = index === focusedIndex
+              const expanded = expandedId === job.id
+              return (
+                <article
+                  key={job.id}
+                  className={`job-card ${focused ? 'row-focused' : ''} ${expanded ? 'row-expanded' : ''}`}
+                  onClick={() => setFocusedIndex(index)}
+                >
+                  <div className="job-card-top">
+                    <span className="score">{job.priority_score ?? '—'}</span>
+                    {CLOSED_STATUSES.includes(job.status as OutcomeFilter) && (
+                      <span className={`outcome-badge outcome-badge--${job.status}`}>
+                        {outcomeLabel(job.status)}
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    className="title-expand job-card-title"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setFocusedIndex(index)
+                      setExpandedId(id => (id === job.id ? null : job.id))
+                    }}
+                  >
+                    {job.title}
+                  </button>
+                  <div className="job-card-meta">{renderJobMeta(job)}</div>
+                  {expanded && scoreBreakdown(job)}
+                  {!expanded && job.description && (
+                    <p className="job-description">
+                      {job.description.substring(0, 120)}
+                      {job.description.length > 120 && '...'}
+                    </p>
+                  )}
+                  <div className="row-actions" onClick={(e) => e.stopPropagation()}>
+                    <a href={job.url} target="_blank" rel="noopener noreferrer" className="view-link">Open</a>
+                    {triageActions(job)}
+                  </div>
+                </article>
+              )
+            })}
+          </div>
 
           {filteredJobs.length === 0 && (
             <div className="no-results">
               {jobs.length === 0
-                ? `No ${statusFilter} jobs. Click Refresh to pull Freelancer Squarespace listings.`
+                ? EMPTY_COPY[statusFilter]
                 : 'No jobs match your filters or search. Clear them to see all results.'}
             </div>
           )}
-        </div>
+        </>
       )}
 
       {applyJob && (
