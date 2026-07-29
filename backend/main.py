@@ -257,8 +257,15 @@ async def refresh_jobs_background(conn: sqlite3.Connection):
     log_id = log_scrape_start(conn, "jobs")
 
     try:
-        rows_affected = await squarespace_jobs.scrape(conn)
-        log_scrape_end(conn, log_id, "success", rows_affected=rows_affected)
+        rows_affected, warning = await squarespace_jobs.scrape(conn)
+        # Partial success still counts as success; keep warnings in error column
+        log_scrape_end(
+            conn,
+            log_id,
+            "success",
+            rows_affected=rows_affected,
+            error=warning,
+        )
     except Exception as e:
         log_scrape_end(conn, log_id, "failed", error=str(e))
 

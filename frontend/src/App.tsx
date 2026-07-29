@@ -285,7 +285,9 @@ function App() {
 
           {filteredJobs.length === 0 && (
             <div className="no-results">
-              No jobs found. Try adjusting your filters or search terms.
+              {jobs.length === 0
+                ? 'No jobs yet. Click Refresh to pull Freelancer Squarespace listings.'
+                : 'No jobs match your filters or search. Clear them to see all results.'}
             </div>
           )}
         </div>
