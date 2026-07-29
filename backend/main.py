@@ -1,8 +1,10 @@
-from fastapi import FastAPI, BackgroundTasks, HTTPException
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
+from fastapi.responses import JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 import sqlite3
 import os
+import base64
+import secrets
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -18,6 +20,54 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Global database connection
 db: Optional[sqlite3.Connection] = None
+
+PUBLIC_PATHS = {"/health"}
+
+
+def _unauthorized() -> Response:
+    return Response(
+        content="Authentication required",
+        status_code=401,
+        headers={"WWW-Authenticate": 'Basic realm="Alexek HQ"'},
+        media_type="text/plain",
+    )
+
+
+@app.middleware("http")
+async def password_protect(request: Request, call_next):
+    """HTTP Basic Auth for the whole app except /health (Railway healthcheck)."""
+    path = request.url.path.rstrip("/") or "/"
+    if path in PUBLIC_PATHS or path == "/health":
+        return await call_next(request)
+
+    expected_user = os.getenv("DASHBOARD_USERNAME", "admin")
+    expected_pass = os.getenv("DASHBOARD_PASSWORD", "")
+
+    if not expected_pass:
+        # Local/dev without a password stays open; Railway must set one.
+        if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
+            return JSONResponse(
+                {"detail": "DASHBOARD_PASSWORD is not configured"},
+                status_code=503,
+            )
+        return await call_next(request)
+
+    header = request.headers.get("Authorization", "")
+    if not header.startswith("Basic "):
+        return _unauthorized()
+
+    try:
+        decoded = base64.b64decode(header[6:]).decode("utf-8")
+        username, _, password = decoded.partition(":")
+    except Exception:
+        return _unauthorized()
+
+    user_ok = secrets.compare_digest(username, expected_user)
+    pass_ok = secrets.compare_digest(password, expected_pass)
+    if not (user_ok and pass_ok):
+        return _unauthorized()
+
+    return await call_next(request)
 
 @app.on_event("startup")
 async def startup():
