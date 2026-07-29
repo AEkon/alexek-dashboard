@@ -5,9 +5,10 @@
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
-    "healthcheckPath": "/health",
-    "healthcheckTimeout": 300,
+    "healthcheckPath": "/",
+    "healthcheckTimeout": 60,
     "restartPolicyType": "ON_FAILURE",
-    "memory": "512"
+    "memory": "512",
+    "startTimeout": 180
   }
 }

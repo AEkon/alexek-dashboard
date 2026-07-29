@@ -17,7 +17,14 @@ db: Optional[sqlite3.Connection] = None
 async def startup():
     """Initialize database on startup."""
     global db
-    db = init_db()
+    try:
+        print("Starting Squarespace Job Dashboard API...")
+        db = init_db()
+        print("Database initialized successfully")
+        print("API ready to serve requests")
+    except Exception as e:
+        print(f"Startup error: {e}")
+        raise
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -25,6 +32,11 @@ async def shutdown():
     global db
     if db:
         db.close()
+
+@app.get("/")
+async def root():
+    """Root endpoint for basic connectivity test."""
+    return {"message": "Squarespace Job Dashboard API", "status": "running"}
 
 @app.get("/health")
 async def health():
