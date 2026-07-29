@@ -1,0 +1,326 @@
+/* Color system - 4 colors with clear roles */
+:root {
+  --color-primary: #722F37;    /* navigation, headers, emphasis */
+  --color-accent: #2A9D8F;     /* interactive elements, links, success states */
+  --color-highlight: #C4813D;  /* warnings, fragile connections */
+  --color-bg: #FAF0E6;         /* page background */
+  --color-text: #2C2C2C;       /* text color */
+  --color-border: #D4C4B0;      /* borders */
+}
+
+/* Reset and base styles */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  line-height: 1.6;
+  font-size: 16px;
+}
+
+/* Dashboard layout */
+.dashboard {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 1.5rem;
+  min-height: 100vh;
+}
+
+/* Header with refresh button */
+.dashboard-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+  padding-bottom: 1rem;
+  border-bottom: 2px solid var(--color-primary);
+}
+
+.dashboard-header h1 {
+  color: var(--color-primary);
+  font-size: 1.8rem;
+  font-weight: 700;
+}
+
+.refresh-button {
+  background-color: var(--color-accent);
+  color: white;
+  border: none;
+  padding: 0.5rem 1rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 1rem;
+  font-weight: 500;
+  transition: background-color 0.2s;
+}
+
+.refresh-button:hover:not(:disabled) {
+  background-color: #238B7D;
+}
+
+.refresh-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Stats row */
+.stats-row {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.stat-card {
+  background-color: white;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 1rem 1.5rem;
+  text-align: center;
+  flex: 1;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.stat-value {
+  font-size: 2rem;
+  font-weight: 700;
+  color: var(--color-primary);
+  line-height: 1.2;
+}
+
+.stat-label {
+  font-size: 0.875rem;
+  color: var(--color-text);
+  opacity: 0.8;
+  margin-top: 0.25rem;
+}
+
+/* Controls section */
+.controls {
+  margin-bottom: 1.5rem;
+}
+
+.search-input {
+  width: 100%;
+  max-width: 400px;
+  padding: 0.75rem 1rem;
+  border: 2px solid var(--color-border);
+  border-radius: 4px;
+  font-size: 1rem;
+  margin-bottom: 1rem;
+  background-color: white;
+}
+
+.search-input:focus {
+  outline: none;
+  border-color: var(--color-accent);
+}
+
+/* Filter pills */
+.filter-pills {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+}
+
+.filter-pill {
+  background-color: white;
+  border: 1px solid var(--color-border);
+  color: var(--color-text);
+  padding: 0.4rem 0.8rem;
+  border-radius: 20px;
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-weight: 500;
+  transition: all 0.2s;
+}
+
+.filter-pill:hover {
+  border-color: var(--color-accent);
+  background-color: rgba(42, 157, 143, 0.05);
+}
+
+.filter-pill.active {
+  background-color: var(--color-accent);
+  color: white;
+  border-color: var(--color-accent);
+}
+
+/* Error and loading states */
+.error-message {
+  background-color: rgba(196, 129, 61, 0.1);
+  border: 1px solid var(--color-highlight);
+  color: var(--color-highlight);
+  padding: 1rem;
+  border-radius: 4px;
+  margin-bottom: 1rem;
+}
+
+.loading {
+  text-align: center;
+  padding: 2rem;
+  color: var(--color-text);
+  opacity: 0.7;
+}
+
+.no-results {
+  text-align: center;
+  padding: 2rem;
+  color: var(--color-text);
+  opacity: 0.7;
+  font-style: italic;
+}
+
+/* Jobs table */
+.jobs-table-container {
+  background-color: white;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  overflow-x: auto;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.jobs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.jobs-table thead {
+  background-color: var(--color-primary);
+  color: white;
+}
+
+.jobs-table th {
+  padding: 0.75rem 1rem;
+  text-align: left;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.jobs-table th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.jobs-table th.sortable:hover {
+  background-color: #632930;
+}
+
+.jobs-table tbody tr {
+  border-bottom: 1px solid var(--color-border);
+  transition: background-color 0.1s;
+}
+
+.jobs-table tbody tr:hover {
+  background-color: rgba(114, 47, 55, 0.05);
+}
+
+.jobs-table td {
+  padding: 0.75rem 1rem;
+  vertical-align: top;
+}
+
+/* Job title styling */
+.job-title {
+  min-width: 250px;
+}
+
+.job-title > div:first-child {
+  font-weight: 600;
+  color: var(--color-primary);
+  margin-bottom: 0.25rem;
+}
+
+.job-description {
+  font-size: 0.85rem;
+  color: var(--color-text);
+  opacity: 0.8;
+  line-height: 1.4;
+}
+
+/* Rate styling */
+.rate {
+  font-weight: 600;
+  color: var(--color-accent);
+}
+
+.rate-unknown {
+  color: var(--color-text);
+  opacity: 0.5;
+}
+
+/* Keywords */
+.keywords {
+  display: flex;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+  max-width: 200px;
+}
+
+.keyword-tag {
+  background-color: rgba(42, 157, 143, 0.1);
+  color: var(--color-accent);
+  padding: 0.2rem 0.5rem;
+  border-radius: 12px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* Action buttons */
+.apply-button {
+  display: inline-block;
+  background-color: var(--color-accent);
+  color: white;
+  text-decoration: none;
+  padding: 0.4rem 0.8rem;
+  border-radius: 4px;
+  font-size: 0.875rem;
+  font-weight: 500;
+  transition: background-color 0.2s;
+  white-space: nowrap;
+}
+
+.apply-button:hover {
+  background-color: #238B7D;
+}
+
+/* Responsive design */
+@media (max-width: 768px) {
+  .dashboard {
+    padding: 1rem;
+  }
+
+  .dashboard-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1rem;
+  }
+
+  .stats-row {
+    flex-direction: column;
+  }
+
+  .jobs-table {
+    font-size: 0.8rem;
+  }
+
+  .jobs-table th,
+  .jobs-table td {
+    padding: 0.5rem 0.75rem;
+  }
+
+  .job-title {
+    min-width: 150px;
+  }
+
+  .keywords {
+    max-width: 150px;
+  }
+}

@@ -1,0 +1,481 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2870
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 # Build a Custom Dashboard with Claude Code\
+\
+A single-file skill for building a personal dashboard from scratch using Claude Code as your primary developer. This bundles months of hard-won lessons from building and maintaining two custom dashboards into one reference.\
+\
+Everything you need is _probably_ here, but this is not the actual system I used, it's just some helpers for another AI agent. The first thing you should do once you're rolling is move the reference sections (Database, Design System, Frontend Patterns, etc.) into their own files so your AI assistant can load only what's relevant per task. But start with this single file so you can see the whole picture, and tweak it according to your prefernces. \
+\
+---\
+\
+## Stack\
+\
+Chosen for minimal dependencies and fast iteration. A personal dashboard is a tool for one user so you just need something you can restart in a second and fix by squinting at the code.\
+\
+| Layer | Technology | Why |\
+|-------|-----------|-----|\
+| Backend | Python 3.12+ / FastAPI | Async, auto-docs, validation. You can read the code. |\
+| Database | SQLite (WAL mode) | Single file on your laptop. No server. No config. |\
+| Frontend | React + TypeScript + Vite | Mature, fast dev server, good tooling. |\
+| Proxy | Vite dev server | Proxies `/api` to backend port. One origin, no CORS. |\
+| ORM | None | Direct SQL. An ORM adds a layer of translation for no audience. |\
+| State mgmt | None | `useState` / `useCallback`. You have one user. |\
+| Component lib | None | Vanilla CSS. Keeps the bundle small, styling explicit. |\
+| Routing lib | None | It's one page. |\
+\
+---\
+\
+## Architecture\
+\
+```\
+your-dashboard/\
+\uc0\u9500 \u9472 \u9472  backend/\
+\uc0\u9474    \u9500 \u9472 \u9472  main.py            # FastAPI app \'97 all routes\
+\uc0\u9474    \u9500 \u9472 \u9472  db.py              # SQLite connection, schema init, migrations\
+\uc0\u9474    \u9500 \u9472 \u9472  scrapers/           # One file per data source\
+\uc0\u9474    \u9474    \u9500 \u9472 \u9472  github.py\
+\uc0\u9474    \u9474    \u9500 \u9472 \u9472  rss.py\
+\uc0\u9474    \u9474    \u9492 \u9472 \u9472  ...\
+\uc0\u9474    \u9492 \u9472 \u9472  requirements.txt\
+\uc0\u9500 \u9472 \u9472  frontend/\
+\uc0\u9474    \u9500 \u9472 \u9472  src/\
+\uc0\u9474    \u9474    \u9500 \u9472 \u9472  App.tsx         # Start here. Extract components at ~800 lines.\
+\uc0\u9474    \u9474    \u9500 \u9472 \u9472  App.css         # Single CSS file until you extract components\
+\uc0\u9474    \u9474    \u9492 \u9472 \u9472  components/     # Created when App.tsx gets too big\
+\uc0\u9474    \u9500 \u9472 \u9472  vite.config.ts      # Proxy config lives here\
+\uc0\u9474    \u9492 \u9472 \u9472  package.json\
+\uc0\u9500 \u9472 \u9472  tests/\
+\uc0\u9474    \u9500 \u9472 \u9472  test_api.py         # pytest \'97 endpoint shapes, upsert logic\
+\uc0\u9474    \u9492 \u9472 \u9472  test_ui.spec.ts     # Playwright \'97 headless only, always\
+\uc0\u9500 \u9472 \u9472  queue/                   # Task files for Claude Code (see Queue System below)\
+\uc0\u9492 \u9472 \u9472  .impeccable.md           # Design context for the frontend-design skill (optional)\
+```\
+\
+### Per-card refresh architecture\
+\
+This is the core pattern that makes the dashboard feel alive without polling:\
+\
+- Each visual **section** of the dashboard maps to a **data source**\
+- Each section has a **GET endpoint** (fetch current data) and a **POST endpoint** (re-scrape that source)\
+- Each section has a **refresh icon** in its header that hits the POST endpoint\
+- The frontend updates just that section's state on success\
+\
+```python\
+@app.get("/api/tasks")\
+async def get_tasks():\
+    return db.execute("SELECT * FROM tasks WHERE status = 'open' ORDER BY priority").fetchall()\
+\
+@app.post("/api/refresh/tasks")\
+async def refresh_tasks(background_tasks: BackgroundTasks):\
+    background_tasks.add_task(scrapers.tasks.sync_from_source)\
+    return \{"status": "refreshing"\}\
+```\
+\
+Long-running refreshes (scraping, API calls) should return 202 immediately and run in a background thread. Track status in a `scrape_log` table so the UI can show a spinner and the system can prevent duplicate concurrent runs.\
+\
+---\
+\
+## Database\
+\
+### SQLite configuration\
+\
+```python\
+import sqlite3\
+\
+def get_db(db_path="dashboard.db"):\
+    conn = sqlite3.connect(db_path, timeout=30)\
+    conn.row_factory = sqlite3.Row\
+    conn.execute("PRAGMA journal_mode=WAL")\
+    conn.execute("PRAGMA busy_timeout=30000")\
+    return conn\
+```\
+\
+| Setting | Value | Why |\
+|---------|-------|-----|\
+| WAL mode | Always on | Lets reads happen during writes |\
+| busy_timeout | 30000ms | Prevents "database is locked" when scraper writes overlap with frontend reads |\
+| row_factory | `sqlite3.Row` | Dict-like access without an ORM |\
+| Write transactions | `BEGIN IMMEDIATE` | Single writer \'97 claim the lock early, fail fast |\
+\
+### Schema evolution (no migration framework)\
+\
+Migrations are ALTER TABLE statements that swallow "already exists" errors. Run on every app startup. Idempotent by design.\
+\
+```python\
+def migrate(conn):\
+    migrations = [\
+        "ALTER TABLE posts ADD COLUMN engagement_score REAL DEFAULT 0",\
+        "ALTER TABLE tasks ADD COLUMN source TEXT DEFAULT 'manual'",\
+    ]\
+    for sql in migrations:\
+        try:\
+            conn.execute(sql)\
+        except sqlite3.OperationalError:\
+            pass  # column already exists\
+    conn.commit()\
+```\
+\
+### The upsert rule: never overwrite non-zero with zero\
+\
+This is the single most important database convention. Scrapers fail \'97 they get rate-limited, time out, return empty responses. If you blindly upsert, a failed scrape at midnight will zero out your real data.\
+\
+```sql\
+INSERT INTO posts (id, title, views, likes)\
+VALUES (?, ?, ?, ?)\
+ON CONFLICT(id) DO UPDATE SET\
+  title = excluded.title,\
+  views = CASE WHEN excluded.views > 0 THEN excluded.views ELSE views END,\
+  likes = CASE WHEN excluded.likes > 0 THEN excluded.likes ELSE likes END\
+```\
+\
+Apply this pattern to every numeric field that comes from an external source. The title (a string) can be overwritten freely; the counts cannot. And for that matter, never put 0 when the answer is really "null" because you don't have data. \
+\
+### Scrape logging\
+\
+```sql\
+CREATE TABLE IF NOT EXISTS scrape_log (\
+    id INTEGER PRIMARY KEY,\
+    scraper TEXT NOT NULL,\
+    started_at TEXT NOT NULL,\
+    finished_at TEXT,\
+    status TEXT DEFAULT 'running',  -- running | success | failed\
+    rows_affected INTEGER DEFAULT 0,\
+    error TEXT\
+);\
+```\
+\
+Before starting a scraper, check if one is already running:\
+\
+```python\
+running = db.execute(\
+    "SELECT 1 FROM scrape_log WHERE scraper = ? AND status = 'running'", (name,)\
+).fetchone()\
+if running:\
+    return \{"status": "already_running"\}\
+```\
+\
+---\
+\
+## Design System\
+\
+### Color system\
+\
+Pick exactly 4 colors. Assign them roles. Use CSS custom properties so theming is a one-line change.\
+\
+```css\
+:root \{\
+  --color-primary: #722F37;    /* navigation, headers, emphasis */\
+  --color-accent: #2A9D8F;     /* interactive elements, links, success states */\
+  --color-highlight: #C4813D;  /* warnings, fragile connections */\
+  --color-bg: #FAF0E6;         /* page background */\
+\}\
+```\
+\
+The specific colors don't matter as much as having clear, non-overlapping roles. Avoid the AI color palette: cyan-on-dark, purple-to-blue gradients, neon accents on dark backgrounds.\
+\
+### Design rules\
+\
+| Rule | Detail |\
+|------|--------|\
+| Information density over whitespace | If you have to scroll to understand state, you won't check the dashboard |\
+| Every chart element links to detail | Click-through from everything \'97 stats, chart bars, table rows |\
+| Every table column must be sortable | Click header to toggle asc/desc. Missing sort = bug. |\
+| Cap table rows at 5\'9610 | "Show more" toggle below. Don't render 500 rows on load. |\
+| Per-card refresh buttons | Every section header gets a refresh icon |\
+| No fake or interpolated data | If a scraper failed, show "no data" or last-known value |\
+| Filter pills, not dropdowns | Clickable, highlighted when active. Filters are visible state. |\
+| Collapsible sections | Expand/collapse with a chevron. Saves vertical space. |\
+| Labels on everything | Don't hide context behind tooltips. You'll forget what unlabeled buttons do. |\
+\
+### CSS anti-patterns (the AI slop test)\
+\
+These are patterns AI assistants produce by default. Push back on all of them:\
+\
+| Don't | Do instead |\
+|-------|-----------|\
+| `style=\{\{\}\}` inline styles | CSS classes. Always. Inline styles bypass theming. |\
+| Colored left-border "pill" indicators | Subtle background tint `rgba(color, 0.08)` + border-radius |\
+| Cards inside cards | Flatten the hierarchy. Not everything needs a container. |\
+| Identical card grids (icon + heading + text \'d7 N) | Vary the layout. Tables, lists, inline stats \'97 mix formats. |\
+| Hero metric layout (big number, small label, gradient) | Inline the number in context where it's actionable |\
+| Glassmorphism (blur, glass cards, glow borders) | Solid backgrounds. Decorative blur is never purposeful. |\
+| Gradient text on headings or metrics | Solid color. Gradients are decoration masquerading as emphasis. |\
+| Rounded rectangles with generic drop shadows | Sharp or very subtle radius. Drop shadows should be barely visible. |\
+| Pure black `#000` or pure white `#fff` | Tint toward your palette. Pure B&W never appears in nature. |\
+| Bounce/elastic easing | `ease-out-quart` or `ease-out-expo`. Real objects decelerate smoothly. |\
+| Modals for everything | Inline expand, slide panels, or navigate. Modals are lazy. |\
+| Gray text on colored backgrounds | Use a shade of the background color \'97 gray looks washed out |\
+\
+**The test:** If you showed this interface to someone and said "AI made this," would they believe you immediately? If yes, fix it.\
+\
+### Typography\
+\
+- Pick a distinctive display font + a clean body font. Pair, don't match.\
+- Use a modular type scale with `clamp()` for fluid sizing.\
+- Vary weights and sizes to create clear hierarchy.\
+- Don't use Inter, Roboto, Arial, Open Sans, or system defaults. These scream "didn't choose a font."\
+- Don't use monospace as shorthand for "technical."\
+- Don't put large rounded-corner icons above every heading \'97 it's templated.\
+\
+### Spacing\
+\
+- Create rhythm through *varied* spacing. Tight groupings, generous separations. Not the same padding everywhere.\
+- Use `clamp()` for fluid spacing that breathes on larger screens.\
+- Don't center everything. Left-aligned text with asymmetric layouts feels more intentional.\
+\
+---\
+\
+## Scrapers\
+\
+### Pattern\
+\
+One file per data source. Each scraper:\
+1. Fetches from one external source (API, RSS, scrape)\
+2. Transforms into your schema\
+3. Upserts into SQLite (respecting the non-zero rule)\
+4. Returns a count of affected rows\
+\
+```python\
+# scrapers/github.py\
+import os, httpx\
+\
+async def scrape(db):\
+    resp = httpx.get(\
+        "https://api.github.com/notifications",\
+        headers=\{"Authorization": f"Bearer \{os.environ['GITHUB_TOKEN']\}"\}\
+    )\
+    rows = 0\
+    for item in resp.json():\
+        db.execute("""\
+            INSERT INTO respondables (source, source_id, title, url, created_at, status)\
+            VALUES ('github', ?, ?, ?, ?, 'pending')\
+            ON CONFLICT(source, source_id) DO UPDATE SET title = excluded.title\
+        """, (item['id'], item['subject']['title'], item['url'], item['updated_at']))\
+        rows += 1\
+    db.commit()\
+    return rows\
+```\
+\
+### Scraper rules\
+\
+- **All secrets from environment variables.** Never hardcode tokens in code or commands.\
+- **Idempotent.** Running twice must not create duplicates. Upsert on natural keys.\
+- **Headless only.** If a scraper needs a browser, Playwright in headless mode. Never pop a visible window \'97 it steals focus and can trigger platform security flags.\
+- **No concurrent duplicates.** Check `scrape_log` before starting.\
+- **Log everything.** Write to `scrape_log` on start and on finish (success or failure). You will need this to debug data gaps.\
+\
+---\
+\
+## Frontend interaction patterns\
+\
+Implement these from the start \'97 retrofitting them is painful:\
+\
+### Sortable table headers\
+\
+```tsx\
+const [sortKey, setSortKey] = useState('created_at');\
+const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');\
+\
+const toggleSort = (key: string) => \{\
+  if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc');\
+  else \{ setSortKey(key); setSortDir('asc'); \}\
+\};\
+\
+// In the table header:\
+<th onClick=\{() => toggleSort('title')\} style=\{\{ cursor: 'pointer' \}\}>\
+  Title \{sortKey === 'title' ? (sortDir === 'asc' ? '\uc0\u9650 ' : '\u9660 ') : ''\}\
+</th>\
+```\
+\
+### Filter pills\
+\
+```tsx\
+const [activeFilter, setActiveFilter] = useState<string | null>(null);\
+const platforms = [...new Set(data.map(d => d.platform))];\
+\
+// Render:\
+\{platforms.map(p => (\
+  <button\
+    key=\{p\}\
+    className=\{`filter-pill $\{activeFilter === p ? 'active' : ''\}`\}\
+    onClick=\{() => setActiveFilter(activeFilter === p ? null : p)\}\
+  >\
+    \{p\}\
+  </button>\
+))\}\
+```\
+\
+### Expandable rows\
+\
+Lazy-load detail on first expand \'97 don't fetch detail for every row on page load.\
+\
+### Per-card refresh\
+\
+```tsx\
+const [refreshing, setRefreshing] = useState(false);\
+\
+const handleRefresh = async () => \{\
+  setRefreshing(true);\
+  await fetch('/api/refresh/tasks', \{ method: 'POST' \});\
+  const res = await fetch('/api/tasks');\
+  setTasks(await res.json());\
+  setRefreshing(false);\
+\};\
+\
+// In the section header:\
+<button onClick=\{handleRefresh\} disabled=\{refreshing\}>\
+  \{refreshing ? '\uc0\u10227 ' : '\u8635 '\}\
+</button>\
+```\
+\
+---\
+\
+## Testing\
+\
+### Backend (pytest)\
+\
+Test every endpoint returns the right shape. Test the upsert rule explicitly \'97 insert a row with views=500, then upsert with views=0, and assert views is still 500.\
+\
+### Frontend (if playwright \'97 headless, always; ask your user what test patterns they want to use, mcp servers are also an option, or connected chrome extensions)\
+\
+Verify the page loads (not blank = not crashed), key sections render, sort works, filter pills work.\
+\
+**Force headless in your config:**\
+```ts\
+// playwright.config.ts\
+export default defineConfig(\{\
+  use: \{ headless: true \},\
+\});\
+```\
+\
+AI assistants often try to launch headed browsers from background agents. This pops Chrome windows on your desktop, steals focus, and can trigger security flags on platforms you're scraping. Always headless. No exceptions.\
+\
+### After every code change\
+\
+1. **Python changed** \uc0\u8594  restart the backend. Don't ask, just do it. Then verify multiple endpoints (not just `/health` \'97 a server can return healthy while every other route 500s).\
+2. **Frontend changed** \uc0\u8594  take a headless screenshot. Verify the page loads and the changed section renders. Blank page = React crash.\
+3. Run the test suite.\
+4. Commit with a short descriptive message.\
+\
+---\
+\
+## Working with Claude Code\
+\
+### Agent delegation model\
+\
+Keep the main conversation for discussion and direction. Delegate all code changes to agents. This keeps your context window clean and lets work happen in parallel.\
+\
+**Three agents:**\
+\
+| Agent | Handles | When to dispatch |\
+|-------|---------|-----------------|\
+| Backend | Python, FastAPI, SQLite, scrapers, db.py | Any Python file change |\
+| Frontend | React, TypeScript, CSS, components | Any frontend file change |\
+| Test | Playwright + pytest | After every code change |\
+\
+Each agent reads a shared conventions file (your design system, database rules, CSS rules) plus a domain-specific reference (which endpoints exist, which tables, which scrapers). Write these reference files early \'97 they prevent agents from reinventing patterns or contradicting each other.\
+\
+**Critical rules for agents:**\
+- Agents must NOT spawn sub-agents or background tasks. The main thread is the only orchestrator.\
+- Agents must NOT open browser windows or tabs. All browser automation is headless CLI only.\
+- Agents must NOT run scrapers directly \'97 scrapers should be triggered from the main thread so you can track them.\
+- After an agent finishes, the main thread restarts services, runs tests, and verifies. The agent just writes code and commits.\
+\
+### Queue system\
+\
+When you think of a task while agents are busy, write a markdown file to `queue/`:\
+\
+```markdown\
+# Fix sort on engagement column\
+\
+The engagement_score column in the Posts table doesn't sort when clicked.\
+Should match the toggleSort pattern from the other tables.\
+```\
+\
+Name files descriptively: `fix-sort-engagement.md`, not `task-001.md`. When the current work finishes, the orchestrator reads the queue and picks the next item.\
+\
+### Autonomous grinding loop\
+\
+If you want Claude Code to work through your queue unattended, set up a cron tick (every 10 minutes works well):\
+\
+```\
+1. CHECK SERVICES\
+   Are backend and frontend running? (lsof -ti:PORT)\
+   If down, restart with nohup (must survive task cleanup).\
+   Verify with curl to multiple endpoints.\
+\
+2. CHECK IN-FLIGHT AGENTS\
+   Still running? Tail their output to verify progress.\
+   Stalled for 2+ ticks? Kill and re-dispatch.\
+   Don't double-dispatch active agents.\
+\
+3. PROCESS COMPLETED WORK\
+   Agent finished since last tick?\
+   \uc0\u8594  Restart backend if Python changed (nohup, not background task)\
+   \uc0\u8594  Run test agent\
+   \uc0\u8594  Screenshot frontend (headless) to visual-verify\
+   \uc0\u8594  If broken, dispatch fix agent. If clean, archive queue item.\
+\
+4. PICK NEXT TASK\
+   Read queue/*.md. Sort by size (small > medium > large).\
+   Pick smallest unblocked item.\
+   If nothing actionable: run tests to find regressions, or idle.\
+\
+5. DISPATCH\
+   Launch appropriate background agent for the chosen task.\
+\
+6. REPORT\
+   One-line status. Don't narrate.\
+```\
+\
+**The loop must be terse.** It runs every 10 minutes for hours. Don't re-read skill files, don't reload references, don't explain what you're doing. Just check state, act, report.\
+\
+**Backend restart command pattern** (must survive cron task cleanup):\
+```bash\
+cd /path/to/dashboard && source .venv/bin/activate && \\\
+  nohup python -m backend.cli serve > /tmp/dashboard-backend.log 2>&1 & disown\
+```\
+\
+Use `nohup ... & disown`, not `run_in_background`. Background tasks get cleaned up between cron ticks; nohup'd processes survive.\
+\
+---\
+\
+## What to put on the dashboard\
+\
+**The filter:** Every element should either tell you something you didn't know or prompt you to do something specific. If it does neither, delete it.\
+\
+### Start with respondables\
+Things you need to reply to across platforms. Comments, mentions, DMs, threads. Strip out likes/boosts/noise \'97 only show things that want a human response. Add a checkbox to mark them done and make done items disappear.\
+\
+### Add your working set\
+Drafts in progress, active tasks, things you've committed to. Not a full project manager \'97 just the short list. Ideally, clicking a draft opens it in your editor.\
+\
+### Add scored discovery\
+Threads in communities you care about, scored by relevance to your expertise. Your algorithm, not theirs. Scrape specific subreddits, HN, forums \'97 wherever your people are.\
+\
+### Add a content calendar\
+If you publish anything on a schedule, a calendar view with published (read-only) and scheduled (editable) entries. FullCalendar is good for this if you need it.\
+\
+### Resist the KPI cards\
+The AI will build topline KPI cards (total users, total views, total revenue) because dashboards "should" have them. Delete them unless seeing the number on a given day actually changes your behavior. If it doesn't change what you do, it's vanity metrics and it's clutter.\
+\
+---\
+\
+## Pitfalls (hard-won)\
+\
+1. **Verify, don't assume.** After restarting the backend, check multiple endpoints. A server can return `/health: ok` while every data endpoint 500s.\
+2. **Headed browsers from automation.** Automated headed sessions steal desktop focus and trigger platform security flags. Headless only, always, no exceptions.\
+3. **Zero-clobbering.** A scraper that fails and returns 0 will silently destroy your real data if you upsert blindly. The non-zero upsert rule is load-bearing.\
+4. **Hardcoded IDs that drift.** Channel IDs, folder IDs, category slugs \'97 put them in a reference file, not scattered through code. They change and you will forget what they were.\
+5. **Inline styles.** AI assistants default to `style=\{\{\}\}`. Every time. Push back every time. CSS classes or nothing.\
+6. **Nested background tasks.** If an agent spawns its own background tasks, you get orphaned processes, duplicate work, and things the orchestrator can't track. One level of delegation only.\
+7. **Scraper concurrency.** Two instances of the same scraper running simultaneously will corrupt your data or get you rate-limited. Check scrape_log before starting.\
+8. **Forgetting backups.** SQLite is a single file. One bad upsert or a disk failure loses everything. Cron-copy it somewhere: `cp dashboard.db dashboard.db.bak.$(date +%Y%m%d)`.\
+9. **Over-engineering.** You have one user. Don't add caching layers, message queues, or microservices. If the query is slow, add an index.\
+10. **Fiddling.** The dashboard is a tool, not a hobby. Set a time budget for improvements and stick to it. The best dashboard is the one you look at, not the one you're always tweaking.\
+}

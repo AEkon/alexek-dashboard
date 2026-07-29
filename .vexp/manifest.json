@@ -1,0 +1,12 @@
+{
+  "file_hashes": {},
+  "indexed_at_commit": "",
+  "indexed_at_timestamp": "2026-07-29T12:23:24.116403+00:00",
+  "schema_version": 3,
+  "stats": {
+    "total_edges": 0,
+    "total_files": 0,
+    "total_nodes": 0
+  },
+  "vexp_version": "2.1.4"
+}
