@@ -11,7 +11,9 @@ from scrapers import squarespace_jobs
 
 app = FastAPI(title="Personal Dashboard API")
 
-# Mount static files for frontend
+# Mount static files for frontend.
+# Vite emits /assets/*; also expose /static for the same build output.
+app.mount("/assets", StaticFiles(directory="static/assets"), name="assets")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Global database connection
@@ -361,20 +363,31 @@ async def update_task(task_id: int, updates: dict):
 
     return {"status": "no_changes"}
 
-# Serve frontend for all non-API routes
+# Serve frontend for all non-API routes (SPA fallback).
+# Must not intercept /assets or /static — those are mounted above.
 @app.get("/{full_path:path}")
 async def serve_frontend(full_path: str):
     """Serve the React frontend for all non-API routes."""
-    # Check if it's an API route
-    if full_path.startswith("api/") or full_path == "health" or full_path.startswith("health"):
-        raise HTTPException(status_code=404, detail="API endpoint not found")
+    # Never return index.html for API/health/static asset paths
+    if (
+        full_path.startswith("api/")
+        or full_path.startswith("assets/")
+        or full_path.startswith("static/")
+        or full_path == "health"
+        or full_path.startswith("health/")
+    ):
+        raise HTTPException(status_code=404, detail="Not found")
 
-    # Serve index.html for all other routes (React client-side routing)
+    # If the path looks like a real file under static/, serve it
+    candidate = os.path.join("static", full_path)
+    if full_path and os.path.isfile(candidate):
+        return FileResponse(candidate)
+
+    # SPA client-side routing fallback
     index_path = os.path.join("static", "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)
-    else:
-        raise HTTPException(status_code=404, detail="Frontend not built")
+    raise HTTPException(status_code=404, detail="Frontend not built")
 
 if __name__ == "__main__":
     import uvicorn
