@@ -324,3 +324,9 @@ body {
     max-width: 150px;
   }
 }
+
+.score-cell .score {
+  font-weight: 700;
+  color: var(--color-accent);
+  font-variant-numeric: tabular-nums;
+}

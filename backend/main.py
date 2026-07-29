@@ -173,7 +173,10 @@ async def get_jobs(job_type: Optional[str] = None, status: str = "new", limit: i
     jobs = db.execute(
         f"""SELECT * FROM jobs
            WHERE {where_clause}
-           ORDER BY posted_date DESC
+           ORDER BY
+             CASE WHEN priority_score IS NULL THEN 1 ELSE 0 END,
+             priority_score DESC,
+             posted_date DESC
            LIMIT ?""",
         values
     ).fetchall()

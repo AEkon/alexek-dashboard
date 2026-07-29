@@ -17,6 +17,10 @@ interface Job {
   status: string
   created_at: string
   updated_at: string
+  budget: string | null
+  budget_mid_usd: number | null
+  effort_score: number | null
+  priority_score: number | null
 }
 
 interface JobsStats {
@@ -39,7 +43,7 @@ function App() {
   const [searchQuery, setSearchQuery] = useState('')
 
   // Sort states
-  const [sortKey, setSortKey] = useState('posted_date')
+  const [sortKey, setSortKey] = useState('priority_score')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
 
   // Fetch jobs on mount
@@ -104,8 +108,27 @@ function App() {
       setSortDir(sortDir === 'asc' ? 'desc' : 'asc')
     } else {
       setSortKey(key)
-      setSortDir('asc')
+      // Numeric value metrics default high→low
+      setSortDir(['priority_score', 'budget_mid_usd', 'effort_score', 'rate_min', 'posted_date'].includes(key) ? 'desc' : 'asc')
     }
+  }
+
+  const formatBudget = (job: Job) => {
+    if (job.budget) return job.budget
+    if (job.rate_min != null && job.rate_max != null && job.rate_min !== job.rate_max) {
+      return `${job.currency === 'GBP' ? '£' : job.currency === 'EUR' ? '€' : '$'}${job.rate_min}-${job.rate_max}`
+    }
+    if (job.rate_min != null) {
+      return `${job.currency === 'GBP' ? '£' : job.currency === 'EUR' ? '€' : '$'}${job.rate_min}`
+    }
+    return '—'
+  }
+
+  const effortLabel = (score: number | null) => {
+    if (score == null) return '—'
+    if (score <= 3) return `${score} low`
+    if (score <= 6) return `${score} mid`
+    return `${score} high`
   }
 
   // Filter and sort jobs
@@ -218,28 +241,37 @@ function App() {
           <table className="jobs-table">
             <thead>
               <tr>
+                <th onClick={() => toggleSort('priority_score')} className="sortable">
+                  Score {sortKey === 'priority_score' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
+                </th>
                 <th onClick={() => toggleSort('title')} className="sortable">
                   Title {sortKey === 'title' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
+                </th>
+                <th onClick={() => toggleSort('budget_mid_usd')} className="sortable">
+                  Budget {sortKey === 'budget_mid_usd' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
+                </th>
+                <th onClick={() => toggleSort('effort_score')} className="sortable">
+                  Effort {sortKey === 'effort_score' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
                 </th>
                 <th onClick={() => toggleSort('source')} className="sortable">
                   Source {sortKey === 'source' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
                 </th>
-                <th onClick={() => toggleSort('job_type')} className="sortable">
-                  Type {sortKey === 'job_type' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
-                </th>
-                <th onClick={() => toggleSort('rate_min')} className="sortable">
-                  Rate {sortKey === 'rate_min' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
-                </th>
                 <th onClick={() => toggleSort('posted_date')} className="sortable">
                   Posted {sortKey === 'posted_date' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
                 </th>
-                <th>Keywords</th>
                 <th>Action</th>
               </tr>
             </thead>
             <tbody>
               {filteredJobs.map(job => (
                 <tr key={job.id}>
+                  <td className="score-cell">
+                    {job.priority_score != null ? (
+                      <span className="score">{job.priority_score}</span>
+                    ) : (
+                      <span className="rate-unknown">—</span>
+                    )}
+                  </td>
                   <td className="job-title">
                     <div>{job.title}</div>
                     {job.description && (
@@ -249,25 +281,12 @@ function App() {
                       </div>
                     )}
                   </td>
-                  <td>{job.source}</td>
-                  <td>{job.job_type}</td>
                   <td>
-                    {job.rate_min && job.rate_max ? (
-                      <span className="rate">
-                        ${job.rate_min}-{job.rate_max}
-                      </span>
-                    ) : job.rate_min ? (
-                      <span className="rate">${job.rate_min}</span>
-                    ) : (
-                      <span className="rate-unknown">-</span>
-                    )}
+                    <span className="rate">{formatBudget(job)}</span>
                   </td>
+                  <td>{effortLabel(job.effort_score)}</td>
+                  <td>{job.source}</td>
                   <td>{new Date(job.posted_date).toLocaleDateString()}</td>
-                  <td className="keywords">
-                    {job.keyword_matches.split(',').slice(0, 2).map((kw, i) => (
-                      <span key={i} className="keyword-tag">{kw.trim()}</span>
-                    ))}
-                  </td>
                   <td>
                     <a
                       href={job.url}

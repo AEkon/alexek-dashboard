@@ -103,6 +103,10 @@ def migrate(conn: sqlite3.Connection) -> None:
         "ALTER TABLE jobs ADD COLUMN budget TEXT",
         "ALTER TABLE jobs ADD COLUMN client_location TEXT",
         "ALTER TABLE jobs ADD COLUMN remote_ok BOOLEAN DEFAULT 1",
+        "ALTER TABLE jobs ADD COLUMN effort_score INTEGER",
+        "ALTER TABLE jobs ADD COLUMN priority_score REAL",
+        "ALTER TABLE jobs ADD COLUMN budget_mid_usd INTEGER",
+        "CREATE INDEX IF NOT EXISTS idx_jobs_priority_score ON jobs(priority_score)",
     ]
 
     for sql in schema_updates:

@@ -60,28 +60,6 @@ def is_short_term_job(title: str, description: str) -> bool:
     return any(indicator in combined for indicator in SHORT_TERM_INDICATORS)
 
 
-def extract_rate(text: str) -> Optional[Dict[str, int]]:
-    rate_patterns = [
-        r"\$(\d+)-\$?(\d+)",
-        r"\$(\d+)\s*/\s*hr",
-        r"\$(\d+)\s*/\s*hour",
-        r"fixed price.*?\$(\d+)",
-        r"budget.*?\$(\d+)",
-    ]
-    for pattern in rate_patterns:
-        match = re.search(pattern, text.lower())
-        if not match:
-            continue
-        try:
-            if len(match.groups()) >= 2 and match.group(2):
-                return {"rate_min": int(match.group(1)), "rate_max": int(match.group(2))}
-            rate = int(match.group(1))
-            return {"rate_min": rate, "rate_max": rate}
-        except (ValueError, IndexError):
-            continue
-    return None
-
-
 def clean_html(text: str) -> str:
     return html.unescape(re.sub(r"<[^<]+?>", "", text or "")).strip()
 
@@ -102,6 +80,165 @@ def parse_feed_date(published: str) -> str:
     return datetime.utcnow().isoformat()
 
 
+# Rough FX → USD for ranking only (not accounting-grade)
+FX_TO_USD = {
+    "USD": 1.0,
+    "GBP": 1.27,
+    "EUR": 1.08,
+    "AUD": 0.65,
+    "CAD": 0.73,
+    "INR": 0.012,
+    "SGD": 0.74,
+    "NZD": 0.60,
+}
+
+# Effort heuristics: base 5, adjust by signals in title+description
+EFFORT_HIGH = [
+    ("migration", 3),
+    ("migrate", 3),
+    ("redesign", 3),
+    ("rebrand", 2),
+    ("from scratch", 3),
+    ("full website", 3),
+    ("full site", 3),
+    ("entire website", 3),
+    ("ecommerce", 2),
+    ("e-commerce", 2),
+    ("member area", 2),
+    ("membership", 2),
+    ("custom code", 2),
+    ("developer mode", 2),
+    ("multi-page", 2),
+    ("multipage", 2),
+    ("branding", 1),
+    ("wordpress to squarespace", 3),
+]
+
+EFFORT_LOW = [
+    ("quick fix", -3),
+    ("bug fix", -3),
+    ("css fix", -3),
+    ("custom css", -2),
+    ("small fix", -3),
+    ("minor", -2),
+    ("tweak", -2),
+    ("mobile", -1),
+    ("responsive", -1),
+    ("seo", -1),
+    ("optimization", -1),
+    ("optimise", -1),
+    ("optimize", -1),
+    ("one page", -2),
+    ("landing page", -1),
+    ("quick", -2),
+    ("simple", -2),
+    ("urgent", -1),
+]
+
+
+def parse_budget(text: str) -> Optional[Dict[str, object]]:
+    """Parse Freelancer-style Budget: $30 - $250 USD (and £/€ variants)."""
+    if not text:
+        return None
+
+    patterns = [
+        # Budget: $30 - $250 USD
+        r"[Bb]udget:\s*([$£€]?)\s*([\d,]+(?:\.\d+)?)\s*[-–—to]+\s*([$£€]?)\s*([\d,]+(?:\.\d+)?)\s*([A-Z]{3})?",
+        # Budget: $250 USD
+        r"[Bb]udget:\s*([$£€]?)\s*([\d,]+(?:\.\d+)?)\s*([A-Z]{3})?",
+        # ($30 - $250 USD) already covered by first; also bare range
+        r"([$£€])\s*([\d,]+(?:\.\d+)?)\s*[-–—]\s*([$£€]?)\s*([\d,]+(?:\.\d+)?)\s*([A-Z]{3})?",
+        # Hourly $75/hr
+        r"([$£€])\s*([\d,]+(?:\.\d+)?)\s*/\s*hr",
+    ]
+
+    symbol_currency = {"$": "USD", "£": "GBP", "€": "EUR"}
+
+    def to_int(raw: str) -> int:
+        return int(float(raw.replace(",", "")))
+
+    for i, pattern in enumerate(patterns):
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        groups = match.groups()
+        try:
+            if i in (0, 2) and len(groups) >= 4 and groups[3] and groups[1]:
+                sym1, amin, sym2, amax = groups[0], groups[1], groups[2], groups[3]
+                curr = (groups[4] if len(groups) > 4 else None) or symbol_currency.get(sym1) or symbol_currency.get(sym2) or "USD"
+                rate_min, rate_max = to_int(amin), to_int(amax)
+            elif i == 1:
+                sym1, amin, curr = groups[0], groups[1], groups[2]
+                curr = curr or symbol_currency.get(sym1) or "USD"
+                rate_min = rate_max = to_int(amin)
+            elif i == 3:
+                sym1, amin = groups[0], groups[1]
+                curr = symbol_currency.get(sym1) or "USD"
+                rate_min = rate_max = to_int(amin)
+            else:
+                continue
+
+            if rate_min > rate_max:
+                rate_min, rate_max = rate_max, rate_min
+
+            fx = FX_TO_USD.get(curr.upper(), 1.0)
+            mid = (rate_min + rate_max) / 2.0
+            mid_usd = int(round(mid * fx))
+            display = f"{symbol_currency.get(curr, '') or ''}{rate_min}-{rate_max} {curr}".strip()
+            if curr == "USD":
+                display = f"${rate_min}-${rate_max}"
+            elif curr == "GBP":
+                display = f"£{rate_min}-£{rate_max}"
+            elif curr == "EUR":
+                display = f"€{rate_min}-€{rate_max}"
+            else:
+                display = f"{rate_min}-{rate_max} {curr}"
+
+            return {
+                "rate_min": rate_min,
+                "rate_max": rate_max,
+                "currency": curr.upper(),
+                "budget": display,
+                "budget_mid_usd": mid_usd,
+            }
+        except (ValueError, IndexError, TypeError):
+            continue
+    return None
+
+
+def estimate_effort(title: str, description: str) -> int:
+    """Estimate work difficulty 1–10 from listing text."""
+    text = f"{title} {description}".lower()
+    score = 5
+    for phrase, delta in EFFORT_HIGH:
+        if phrase in text:
+            score += delta
+    for phrase, delta in EFFORT_LOW:
+        if phrase in text:
+            score += delta
+    # Longer briefs tend to mean more scope
+    if len(description) > 1200:
+        score += 1
+    if len(description) > 2000:
+        score += 1
+    return max(1, min(10, score))
+
+
+def compute_priority(budget_mid_usd: Optional[int], effort: int) -> Optional[float]:
+    """Value per unit effort. Higher = better cost vs work."""
+    if not budget_mid_usd or budget_mid_usd <= 0 or effort <= 0:
+        return None
+    return round(budget_mid_usd / float(effort), 2)
+
+
+def extract_rate(text: str) -> Optional[Dict[str, int]]:
+    """Backward-compatible wrapper around parse_budget."""
+    parsed = parse_budget(text)
+    if not parsed:
+        return None
+    return {"rate_min": int(parsed["rate_min"]), "rate_max": int(parsed["rate_max"])}
+
+
 def upsert_job(
     db,
     *,
@@ -115,15 +252,21 @@ def upsert_job(
     keyword_matches: str,
     rate_min: Optional[int] = None,
     rate_max: Optional[int] = None,
+    currency: str = "USD",
+    budget: Optional[str] = None,
+    budget_mid_usd: Optional[int] = None,
+    effort_score: Optional[int] = None,
+    priority_score: Optional[float] = None,
 ) -> None:
     now = datetime.utcnow().isoformat()
     db.execute(
         """
         INSERT INTO jobs (
             source, source_id, title, description, url, posted_date, job_type,
-            rate_min, rate_max, currency, keyword_matches, status, created_at, updated_at
+            rate_min, rate_max, currency, keyword_matches, status, created_at, updated_at,
+            budget, budget_mid_usd, effort_score, priority_score
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(source, source_id) DO UPDATE SET
             title = excluded.title,
             description = excluded.description,
@@ -132,7 +275,12 @@ def upsert_job(
             job_type = excluded.job_type,
             rate_min = CASE WHEN excluded.rate_min > 0 THEN excluded.rate_min ELSE rate_min END,
             rate_max = CASE WHEN excluded.rate_max > 0 THEN excluded.rate_max ELSE rate_max END,
+            currency = excluded.currency,
             keyword_matches = excluded.keyword_matches,
+            budget = excluded.budget,
+            budget_mid_usd = CASE WHEN excluded.budget_mid_usd > 0 THEN excluded.budget_mid_usd ELSE budget_mid_usd END,
+            effort_score = excluded.effort_score,
+            priority_score = excluded.priority_score,
             updated_at = excluded.updated_at,
             status = CASE WHEN status = 'archived' THEN 'archived' ELSE excluded.status END
         """,
@@ -146,11 +294,15 @@ def upsert_job(
             job_type,
             rate_min,
             rate_max,
-            "USD",
+            currency,
             keyword_matches,
             "new",
             now,
             now,
+            budget,
+            budget_mid_usd,
+            effort_score,
+            priority_score,
         ),
     )
 
@@ -184,14 +336,21 @@ async def scrape_freelancer_rss(db) -> int:
         if not is_squarespace_job(title, description):
             continue
 
-        rate_info = extract_rate(f"{title} {description}")
-        job_type = "short-term" if is_short_term_job(title, description) else "unknown"
+        budget_info = parse_budget(f"{title} {description}")
+        effort = estimate_effort(title, description)
+        mid_usd = int(budget_info["budget_mid_usd"]) if budget_info else None
+        priority = compute_priority(mid_usd, effort)
+        job_type = "short-term" if is_short_term_job(title, description) or effort <= 3 else "unknown"
         keywords = matched_keywords(title, description)
         posted_date = parse_feed_date(published)
 
         source_id = None
+        guid = str(entry.get("id") or entry.get("guid") or "")
+        guid_match = re.search(r"Freelancer_project_(\d+)", guid)
         id_match = re.search(r"/projects/(\d+)", link)
-        if id_match:
+        if guid_match:
+            source_id = guid_match.group(1)
+        elif id_match:
             source_id = id_match.group(1)
         else:
             source_id = re.sub(r"[^\w-]", "", link.rstrip("/").split("/")[-1])[:80] or link[-50:]
@@ -206,8 +365,13 @@ async def scrape_freelancer_rss(db) -> int:
             posted_date=posted_date,
             job_type=job_type,
             keyword_matches=keywords,
-            rate_min=rate_info.get("rate_min") if rate_info else None,
-            rate_max=rate_info.get("rate_max") if rate_info else None,
+            rate_min=int(budget_info["rate_min"]) if budget_info else None,
+            rate_max=int(budget_info["rate_max"]) if budget_info else None,
+            currency=str(budget_info["currency"]) if budget_info else "USD",
+            budget=str(budget_info["budget"]) if budget_info else None,
+            budget_mid_usd=mid_usd,
+            effort_score=effort,
+            priority_score=priority,
         )
         rows += 1
 
@@ -308,8 +472,11 @@ async def scrape_upwork_graphql(db) -> int:
 
         url = f"https://www.upwork.com/jobs/{ciphertext}" if ciphertext else f"https://www.upwork.com/jobs/~{job_id}"
         posted_date = node.get("publishedDateTime") or datetime.utcnow().isoformat()
-        rate_info = extract_rate(f"{title} {description}")
-        job_type = "short-term" if is_short_term_job(title, description) else "unknown"
+        budget_info = parse_budget(f"{title} {description}")
+        effort = estimate_effort(title, description)
+        mid_usd = int(budget_info["budget_mid_usd"]) if budget_info else None
+        priority = compute_priority(mid_usd, effort)
+        job_type = "short-term" if is_short_term_job(title, description) or effort <= 3 else "unknown"
 
         upsert_job(
             db,
@@ -321,8 +488,13 @@ async def scrape_upwork_graphql(db) -> int:
             posted_date=posted_date,
             job_type=job_type,
             keyword_matches=matched_keywords(title, description),
-            rate_min=rate_info.get("rate_min") if rate_info else None,
-            rate_max=rate_info.get("rate_max") if rate_info else None,
+            rate_min=int(budget_info["rate_min"]) if budget_info else None,
+            rate_max=int(budget_info["rate_max"]) if budget_info else None,
+            currency=str(budget_info["currency"]) if budget_info else "USD",
+            budget=str(budget_info["budget"]) if budget_info else None,
+            budget_mid_usd=mid_usd,
+            effort_score=effort,
+            priority_score=priority,
         )
         rows += 1
 
