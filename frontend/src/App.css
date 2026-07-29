@@ -667,3 +667,56 @@ a.apply-drawer-open {
     width: 100vw;
   }
 }
+
+/* Outcome tracking badges */
+.job-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+  margin-bottom: 0.25rem;
+}
+
+.job-title-row > span:first-child {
+  font-weight: 600;
+  color: var(--color-primary);
+}
+
+.outcome-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  border-radius: 999px;
+  padding: 0.2rem 0.5rem;
+  line-height: 1.2;
+}
+
+.outcome-badge--won {
+  background: rgba(42, 157, 143, 0.15);
+  color: var(--color-accent);
+}
+
+.outcome-badge--lost {
+  background: rgba(114, 47, 55, 0.12);
+  color: var(--color-primary);
+}
+
+.outcome-badge--no_reply {
+  background: rgba(196, 129, 61, 0.15);
+  color: var(--color-highlight);
+}
+
+.filter-pill-count {
+  margin-left: 0.35rem;
+  font-size: 0.7rem;
+  font-weight: 700;
+  opacity: 0.75;
+}
+
+.status-tab--closed:not(.active) .status-tab-count {
+  background: rgba(114, 47, 55, 0.12);
+  color: var(--color-primary);
+}

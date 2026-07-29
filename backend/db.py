@@ -161,13 +161,17 @@ def log_scrape_end(conn: sqlite3.Connection, log_id: int, status: str, rows_affe
     conn.commit()
 
 def purge_stale_data(conn: sqlite3.Connection) -> None:
-    """Drop stale inbox/discarded jobs and cap scrape_log to keep the volume small."""
+    """Drop stale inbox/discarded/outcome jobs and cap scrape_log to keep the volume small."""
     new_days = int(os.getenv("JOB_RETENTION_NEW_DAYS", "21"))
     discard_days = int(os.getenv("JOB_RETENTION_DISCARD_DAYS", "7"))
+    outcome_days = int(os.getenv("JOB_RETENTION_OUTCOME_DAYS", "30"))
+    won_days = int(os.getenv("JOB_RETENTION_WON_DAYS", "90"))
     log_keep = int(os.getenv("SCRAPE_LOG_KEEP", "48"))
 
     cutoff_new = (datetime.utcnow() - timedelta(days=new_days)).isoformat()
     cutoff_discard = (datetime.utcnow() - timedelta(days=discard_days)).isoformat()
+    cutoff_outcome = (datetime.utcnow() - timedelta(days=outcome_days)).isoformat()
+    cutoff_won = (datetime.utcnow() - timedelta(days=won_days)).isoformat()
 
     conn.execute(
         "DELETE FROM jobs WHERE status = 'new' AND posted_date < ?",
@@ -178,6 +182,18 @@ def purge_stale_data(conn: sqlite3.Connection) -> None:
            WHERE status IN ('skipped', 'archived')
              AND COALESCE(updated_at, created_at) < ?""",
         (cutoff_discard,),
+    )
+    conn.execute(
+        """DELETE FROM jobs
+           WHERE status IN ('lost', 'no_reply')
+             AND COALESCE(updated_at, created_at) < ?""",
+        (cutoff_outcome,),
+    )
+    conn.execute(
+        """DELETE FROM jobs
+           WHERE status = 'won'
+             AND COALESCE(updated_at, created_at) < ?""",
+        (cutoff_won,),
     )
     conn.execute(
         """DELETE FROM scrape_log

@@ -280,23 +280,51 @@ async def refresh_posts_background(conn: sqlite3.Connection):
     except Exception as e:
         log_scrape_end(conn, log_id, "failed", error=str(e))
 
-ALLOWED_JOB_STATUSES = {"new", "interested", "applied", "skipped", "archived"}
+CLOSED_JOB_STATUSES = ("won", "lost", "no_reply")
+ALLOWED_JOB_STATUSES = {"new", "interested", "applied", "skipped", "archived", *CLOSED_JOB_STATUSES}
+QUERY_JOB_STATUSES = ALLOWED_JOB_STATUSES | {"closed"}
 
 
 @app.get("/api/jobs")
-async def get_jobs(job_type: Optional[str] = None, status: str = "new", limit: int = 50, source: Optional[str] = None):
+async def get_jobs(
+    job_type: Optional[str] = None,
+    status: str = "new",
+    outcome: Optional[str] = None,
+    limit: int = 50,
+    source: Optional[str] = None,
+):
     """Get Squarespace jobs with optional filtering.
-    Callers: frontend App.tsx. Schema: jobs.status. User: Implement triage plan.
+    Callers: frontend App.tsx. status=closed aggregates won/lost/no_reply; outcome narrows.
+    User: Implement outcome tracking plan.
     """
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
-    if status not in ALLOWED_JOB_STATUSES:
-        raise HTTPException(status_code=400, detail=f"Invalid status. Allowed: {sorted(ALLOWED_JOB_STATUSES)}")
+    if status not in QUERY_JOB_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid status. Allowed: {sorted(QUERY_JOB_STATUSES)}",
+        )
 
-    # Build query with filters
-    where_conditions = ["status = ?"]
-    values = [status]
+    where_conditions = []
+    values: list = []
+
+    if status == "closed":
+        if outcome:
+            if outcome not in CLOSED_JOB_STATUSES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid outcome. Allowed: {list(CLOSED_JOB_STATUSES)}",
+                )
+            where_conditions.append("status = ?")
+            values.append(outcome)
+        else:
+            placeholders = ",".join("?" for _ in CLOSED_JOB_STATUSES)
+            where_conditions.append(f"status IN ({placeholders})")
+            values.extend(CLOSED_JOB_STATUSES)
+    else:
+        where_conditions.append("status = ?")
+        values.append(status)
 
     if job_type:
         where_conditions.append("job_type = ?")
@@ -307,7 +335,7 @@ async def get_jobs(job_type: Optional[str] = None, status: str = "new", limit: i
         values.append(source)
 
     where_clause = " AND ".join(where_conditions)
-    values.append(limit)  # For LIMIT
+    values.append(limit)
 
     jobs = db.execute(
         f"""SELECT * FROM jobs
@@ -317,7 +345,7 @@ async def get_jobs(job_type: Optional[str] = None, status: str = "new", limit: i
              priority_score DESC,
              posted_date DESC
            LIMIT ?""",
-        values
+        values,
     ).fetchall()
 
     return [dict(job) for job in jobs]
@@ -328,18 +356,29 @@ async def search_jobs(q: str, status: str = "new", limit: int = 50):
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
-    if status not in ALLOWED_JOB_STATUSES:
-        raise HTTPException(status_code=400, detail=f"Invalid status. Allowed: {sorted(ALLOWED_JOB_STATUSES)}")
+    if status not in QUERY_JOB_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Invalid status. Allowed: {sorted(QUERY_JOB_STATUSES)}")
 
     search_pattern = f"%{q}%"
-    jobs = db.execute(
-        """SELECT * FROM jobs
-           WHERE status = ?
-           AND (title LIKE ? OR description LIKE ? OR keyword_matches LIKE ?)
-           ORDER BY posted_date DESC
-           LIMIT ?""",
-        (status, search_pattern, search_pattern, search_pattern, limit)
-    ).fetchall()
+    if status == "closed":
+        placeholders = ",".join("?" for _ in CLOSED_JOB_STATUSES)
+        jobs = db.execute(
+            f"""SELECT * FROM jobs
+               WHERE status IN ({placeholders})
+               AND (title LIKE ? OR description LIKE ? OR keyword_matches LIKE ?)
+               ORDER BY posted_date DESC
+               LIMIT ?""",
+            (*CLOSED_JOB_STATUSES, search_pattern, search_pattern, search_pattern, limit),
+        ).fetchall()
+    else:
+        jobs = db.execute(
+            """SELECT * FROM jobs
+               WHERE status = ?
+               AND (title LIKE ? OR description LIKE ? OR keyword_matches LIKE ?)
+               ORDER BY posted_date DESC
+               LIMIT ?""",
+            (status, search_pattern, search_pattern, search_pattern, limit),
+        ).fetchall()
 
     return [dict(job) for job in jobs]
 

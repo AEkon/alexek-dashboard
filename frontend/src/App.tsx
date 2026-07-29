@@ -33,14 +33,40 @@ interface JobsStats {
   recent_7days: number
 }
 
-type TriageStatus = 'new' | 'interested' | 'applied' | 'skipped'
+type JobStatus = 'new' | 'interested' | 'applied' | 'skipped' | 'won' | 'lost' | 'no_reply'
+type TabKey = 'new' | 'interested' | 'applied' | 'closed' | 'skipped'
+type OutcomeFilter = 'won' | 'lost' | 'no_reply'
 
-const STATUS_TABS: { key: TriageStatus; label: string }[] = [
+const STATUS_TABS: { key: TabKey; label: string }[] = [
   { key: 'new', label: 'New' },
   { key: 'interested', label: 'Interested' },
   { key: 'applied', label: 'Applied' },
+  { key: 'closed', label: 'Closed' },
   { key: 'skipped', label: 'Skipped' },
 ]
+
+const OUTCOME_PILLS: { key: OutcomeFilter; label: string }[] = [
+  { key: 'won', label: 'Won' },
+  { key: 'lost', label: 'Lost' },
+  { key: 'no_reply', label: 'No reply' },
+]
+
+const CLOSED_STATUSES: OutcomeFilter[] = ['won', 'lost', 'no_reply']
+
+function tabCount(stats: JobsStats | null, key: TabKey): number {
+  if (!stats) return 0
+  if (key === 'closed') {
+    return CLOSED_STATUSES.reduce((sum, s) => sum + (stats.by_status[s] || 0), 0)
+  }
+  return stats.by_status[key] || 0
+}
+
+function outcomeLabel(status: string): string {
+  if (status === 'no_reply') return 'No reply'
+  if (status === 'won') return 'Won'
+  if (status === 'lost') return 'Lost'
+  return status
+}
 
 function App() {
   const [jobs, setJobs] = useState<Job[]>([])
@@ -48,7 +74,8 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [statusFilter, setStatusFilter] = useState<TriageStatus>('new')
+  const [statusFilter, setStatusFilter] = useState<TabKey>('new')
+  const [outcomeFilter, setOutcomeFilter] = useState<OutcomeFilter | null>(null)
 
   const [jobTypeFilter, setJobTypeFilter] = useState<string | null>(null)
   const [sourceFilter, setSourceFilter] = useState<string | null>(null)
@@ -65,7 +92,7 @@ function App() {
   useEffect(() => {
     fetchJobs()
     fetchStats()
-  }, [statusFilter, jobTypeFilter, sourceFilter])
+  }, [statusFilter, outcomeFilter, jobTypeFilter, sourceFilter])
 
   const fetchJobs = async () => {
     try {
@@ -74,6 +101,7 @@ function App() {
 
       const params = new URLSearchParams()
       params.append('status', statusFilter)
+      if (statusFilter === 'closed' && outcomeFilter) params.append('outcome', outcomeFilter)
       if (jobTypeFilter) params.append('job_type', jobTypeFilter)
       if (sourceFilter) params.append('source', sourceFilter)
       params.append('limit', '50')
@@ -106,7 +134,7 @@ function App() {
     }
   }
 
-  const setJobStatus = async (jobId: number, status: TriageStatus) => {
+  const setJobStatus = async (jobId: number, status: JobStatus) => {
     try {
       const response = await fetch(`/api/jobs/${jobId}`, {
         method: 'PATCH',
@@ -205,7 +233,7 @@ function App() {
   }
 
   const triageActions = (job: Job) => {
-    switch (job.status as TriageStatus) {
+    switch (job.status as JobStatus) {
       case 'new':
         return (
           <div className="triage-group" role="group" aria-label="Triage">
@@ -224,9 +252,20 @@ function App() {
         )
       case 'applied':
         return (
-          <div className="triage-group" role="group" aria-label="Triage">
+          <div className="triage-group" role="group" aria-label="Outcome">
+            <button type="button" className="triage-button triage-primary" onClick={() => setJobStatus(job.id, 'won')}>Won</button>
+            <button type="button" className="triage-button triage-secondary" onClick={() => setJobStatus(job.id, 'lost')}>Lost</button>
+            <button type="button" className="triage-button triage-secondary" onClick={() => setJobStatus(job.id, 'no_reply')}>No reply</button>
             <button type="button" className="triage-button triage-ghost" onClick={() => setJobStatus(job.id, 'interested')}>Back</button>
             <button type="button" className="triage-button triage-ghost" onClick={() => setJobStatus(job.id, 'skipped')}>Skip</button>
+          </div>
+        )
+      case 'won':
+      case 'lost':
+      case 'no_reply':
+        return (
+          <div className="triage-group" role="group" aria-label="Outcome">
+            <button type="button" className="triage-button triage-secondary" onClick={() => setJobStatus(job.id, 'applied')}>Back to Applied</button>
           </div>
         )
       case 'skipped':
@@ -294,7 +333,7 @@ function App() {
       <div className="inbox-bar">
         <div className="status-tabs" role="tablist" aria-label="Job status">
           {STATUS_TABS.map(tab => {
-            const count = stats?.by_status[tab.key] || 0
+            const count = tabCount(stats, tab.key)
             const active = statusFilter === tab.key
             return (
               <button
@@ -303,7 +342,10 @@ function App() {
                 role="tab"
                 aria-selected={active}
                 className={`status-tab status-tab--${tab.key} ${active ? 'active' : ''}`}
-                onClick={() => setStatusFilter(tab.key)}
+                onClick={() => {
+                  setStatusFilter(tab.key)
+                  if (tab.key !== 'closed') setOutcomeFilter(null)
+                }}
               >
                 <span className="status-tab-label">{tab.label}</span>
                 <span className="status-tab-count">{count}</span>
@@ -321,6 +363,22 @@ function App() {
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
         />
+
+        {statusFilter === 'closed' && (
+          <div className="filter-pills">
+            {OUTCOME_PILLS.map(pill => (
+              <button
+                key={pill.key}
+                type="button"
+                className={`filter-pill ${outcomeFilter === pill.key ? 'active' : ''}`}
+                onClick={() => setOutcomeFilter(outcomeFilter === pill.key ? null : pill.key)}
+              >
+                {pill.label}
+                <span className="filter-pill-count">{stats?.by_status[pill.key] || 0}</span>
+              </button>
+            ))}
+          </div>
+        )}
 
         {jobTypes.length > 0 && (
           <div className="filter-pills">
@@ -396,7 +454,14 @@ function App() {
                     )}
                   </td>
                   <td className="job-title">
-                    <div>{job.title}</div>
+                    <div className="job-title-row">
+                      <span>{job.title}</span>
+                      {CLOSED_STATUSES.includes(job.status as OutcomeFilter) && (
+                        <span className={`outcome-badge outcome-badge--${job.status}`}>
+                          {outcomeLabel(job.status)}
+                        </span>
+                      )}
+                    </div>
                     {job.description && (
                       <div className="job-description">
                         {job.description.substring(0, 100)}
