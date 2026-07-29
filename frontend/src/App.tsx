@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
+import { buildProposalStub } from './proposal'
 
-// Callers: main.tsx. API: GET/PATCH /api/jobs, /api/jobs/stats. Schema: jobs.status.
-// User: "Implement the plan as specified" (job triage + lean DB).
+// Callers: main.tsx. API: GET/PATCH /api/jobs, /api/jobs/stats.
+// User: "Implement the plan as specified" (Apply assist).
 
 interface Job {
   id: number
@@ -55,6 +56,11 @@ function App() {
 
   const [sortKey, setSortKey] = useState('priority_score')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
+
+  const [applyJob, setApplyJob] = useState<Job | null>(null)
+  const [proposalText, setProposalText] = useState('')
+  const [copied, setCopied] = useState(false)
+  const [markingApplied, setMarkingApplied] = useState(false)
 
   useEffect(() => {
     fetchJobs()
@@ -115,9 +121,40 @@ function App() {
       if (!response.ok) throw new Error('Failed to update job')
       setJobs(prev => prev.filter(j => j.id !== jobId))
       fetchStats()
+      if (applyJob?.id === jobId) closeApplyDrawer()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to update job')
     }
+  }
+
+  const openApplyDrawer = (job: Job) => {
+    setApplyJob(job)
+    setProposalText(buildProposalStub(job))
+    setCopied(false)
+  }
+
+  const closeApplyDrawer = () => {
+    setApplyJob(null)
+    setProposalText('')
+    setCopied(false)
+    setMarkingApplied(false)
+  }
+
+  const copyProposal = async () => {
+    try {
+      await navigator.clipboard.writeText(proposalText)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1600)
+    } catch {
+      setError('Could not copy to clipboard')
+    }
+  }
+
+  const markAppliedFromDrawer = async () => {
+    if (!applyJob) return
+    setMarkingApplied(true)
+    await setJobStatus(applyJob.id, 'applied')
+    setMarkingApplied(false)
   }
 
   const handleRefresh = async () => {
@@ -172,15 +209,15 @@ function App() {
       case 'new':
         return (
           <div className="triage-group" role="group" aria-label="Triage">
-            <button type="button" className="triage-button triage-primary" onClick={() => setJobStatus(job.id, 'interested')}>Shortlist</button>
-            <button type="button" className="triage-button triage-secondary" onClick={() => setJobStatus(job.id, 'applied')}>Applied</button>
+            <button type="button" className="triage-button triage-primary" onClick={() => openApplyDrawer(job)}>Apply</button>
+            <button type="button" className="triage-button triage-secondary" onClick={() => setJobStatus(job.id, 'interested')}>Shortlist</button>
             <button type="button" className="triage-button triage-ghost" onClick={() => setJobStatus(job.id, 'skipped')}>Skip</button>
           </div>
         )
       case 'interested':
         return (
           <div className="triage-group" role="group" aria-label="Triage">
-            <button type="button" className="triage-button triage-primary" onClick={() => setJobStatus(job.id, 'applied')}>Mark applied</button>
+            <button type="button" className="triage-button triage-primary" onClick={() => openApplyDrawer(job)}>Apply</button>
             <button type="button" className="triage-button triage-ghost" onClick={() => setJobStatus(job.id, 'skipped')}>Skip</button>
             <button type="button" className="triage-button triage-ghost" onClick={() => setJobStatus(job.id, 'new')}>Undo</button>
           </div>
@@ -350,7 +387,7 @@ function App() {
             </thead>
             <tbody>
               {filteredJobs.map(job => (
-                <tr key={job.id}>
+                <tr key={job.id} className={applyJob?.id === job.id ? 'row-active' : undefined}>
                   <td className="score-cell">
                     {job.priority_score != null ? (
                       <span className="score">{job.priority_score}</span>
@@ -399,6 +436,71 @@ function App() {
             </div>
           )}
         </div>
+      )}
+
+      {applyJob && (
+        <>
+          <button
+            type="button"
+            className="apply-drawer-backdrop"
+            aria-label="Close apply panel"
+            onClick={closeApplyDrawer}
+          />
+          <aside className="apply-drawer" role="dialog" aria-modal="true" aria-labelledby="apply-drawer-title">
+            <div className="apply-drawer-header">
+              <div>
+                <p className="apply-drawer-kicker">Apply assist</p>
+                <h2 id="apply-drawer-title">{applyJob.title}</h2>
+              </div>
+              <button type="button" className="apply-drawer-close" onClick={closeApplyDrawer} aria-label="Close">
+                ×
+              </button>
+            </div>
+
+            <div className="apply-drawer-meta">
+              <span>Score {applyJob.priority_score ?? '—'}</span>
+              <span>{formatBudget(applyJob)}</span>
+              <span>{effortLabel(applyJob.effort_score)}</span>
+              <span>{applyJob.source}</span>
+            </div>
+
+            <label className="apply-drawer-label" htmlFor="proposal-text">
+              Proposal stub
+            </label>
+            <textarea
+              id="proposal-text"
+              className="apply-drawer-textarea"
+              value={proposalText}
+              onChange={(e) => setProposalText(e.target.value)}
+              rows={12}
+            />
+
+            <div className="apply-drawer-actions">
+              <button type="button" className="triage-button triage-secondary" onClick={copyProposal}>
+                {copied ? 'Copied' : 'Copy'}
+              </button>
+              <a
+                href={applyJob.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="triage-button triage-secondary apply-drawer-open"
+              >
+                Open listing
+              </a>
+              <button
+                type="button"
+                className="triage-button triage-primary"
+                onClick={markAppliedFromDrawer}
+                disabled={markingApplied}
+              >
+                {markingApplied ? 'Saving…' : 'Mark applied'}
+              </button>
+              <button type="button" className="triage-button triage-ghost" onClick={closeApplyDrawer}>
+                Close
+              </button>
+            </div>
+          </aside>
+        </>
       )}
     </div>
   )
