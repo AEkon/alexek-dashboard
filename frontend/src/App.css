@@ -273,7 +273,173 @@ body {
   white-space: nowrap;
 }
 
-/* Action buttons — App.tsx triage UI. User: Implement triage plan. */
+/* Triage inbox + row actions */
+.inbox-bar {
+  margin-bottom: 1.25rem;
+}
+
+.status-tabs {
+  display: inline-flex;
+  align-items: stretch;
+  background: white;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 1px 2px rgba(44, 44, 44, 0.04);
+}
+
+.status-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--color-border);
+  color: var(--color-text);
+  padding: 0.65rem 1.1rem;
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.status-tab:last-child {
+  border-right: none;
+}
+
+.status-tab:hover {
+  background: rgba(114, 47, 55, 0.04);
+}
+
+.status-tab.active {
+  background: var(--color-primary);
+  color: white;
+}
+
+.status-tab-label {
+  line-height: 1;
+}
+
+.status-tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.35rem;
+  height: 1.35rem;
+  padding: 0 0.35rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  background: rgba(44, 44, 44, 0.08);
+  color: inherit;
+  line-height: 1;
+}
+
+.status-tab.active .status-tab-count {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.status-tab--interested:not(.active) .status-tab-count {
+  background: rgba(42, 157, 143, 0.15);
+  color: var(--color-accent);
+}
+
+.status-tab--applied:not(.active) .status-tab-count {
+  background: rgba(114, 47, 55, 0.12);
+  color: var(--color-primary);
+}
+
+.status-tab--skipped:not(.active) {
+  color: rgba(44, 44, 44, 0.65);
+}
+
+.actions-col,
+.actions-cell {
+  min-width: 220px;
+}
+
+.row-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.55rem;
+}
+
+.view-link {
+  color: var(--color-accent);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  line-height: 1.2;
+}
+
+.view-link:hover {
+  border-bottom-color: var(--color-accent);
+}
+
+.triage-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  align-items: center;
+}
+
+.triage-button {
+  appearance: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1;
+  padding: 0.45rem 0.7rem;
+  white-space: nowrap;
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s, transform 0.1s;
+}
+
+.triage-button:active {
+  transform: translateY(1px);
+}
+
+.triage-button.triage-primary {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: white;
+}
+
+.triage-button.triage-primary:hover {
+  background: #238B7D;
+  border-color: #238B7D;
+}
+
+.triage-button.triage-secondary {
+  background: rgba(114, 47, 55, 0.08);
+  border-color: rgba(114, 47, 55, 0.18);
+  color: var(--color-primary);
+}
+
+.triage-button.triage-secondary:hover {
+  background: rgba(114, 47, 55, 0.14);
+}
+
+.triage-button.triage-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: rgba(44, 44, 44, 0.55);
+  font-weight: 500;
+  padding-left: 0.45rem;
+  padding-right: 0.45rem;
+}
+
+.triage-button.triage-ghost:hover {
+  color: var(--color-highlight);
+  background: rgba(196, 129, 61, 0.08);
+}
+
+/* legacy class kept for any leftover markup */
 .apply-button {
   display: inline-block;
   background-color: var(--color-accent);
@@ -283,82 +449,6 @@ body {
   border-radius: 4px;
   font-size: 0.875rem;
   font-weight: 500;
-  transition: background-color 0.2s;
-  white-space: nowrap;
-}
-
-.apply-button:hover {
-  background-color: #238B7D;
-}
-
-.status-tabs {
-  display: flex;
-  gap: 0.5rem;
-  margin-bottom: 1rem;
-  flex-wrap: wrap;
-}
-
-.status-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  background: white;
-  border: 1px solid var(--color-border);
-  color: var(--color-text);
-  padding: 0.45rem 0.85rem;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 0.9rem;
-  font-weight: 500;
-}
-
-.status-tab:hover {
-  border-color: var(--color-accent);
-}
-
-.status-tab.active {
-  background: var(--color-primary);
-  border-color: var(--color-primary);
-  color: white;
-}
-
-.status-tab-count {
-  font-size: 0.75rem;
-  opacity: 0.85;
-  font-weight: 600;
-}
-
-.row-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem;
-  align-items: center;
-}
-
-.triage-button {
-  background: white;
-  border: 1px solid var(--color-border);
-  color: var(--color-text);
-  padding: 0.35rem 0.6rem;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 0.75rem;
-  font-weight: 500;
-  white-space: nowrap;
-}
-
-.triage-button:hover {
-  border-color: var(--color-accent);
-  color: var(--color-accent);
-}
-
-.triage-button.triage-skip:hover {
-  border-color: var(--color-highlight);
-  color: var(--color-highlight);
-}
-
-.triage-button.triage-muted {
-  opacity: 0.75;
 }
 
 /* Responsive design */
@@ -375,6 +465,25 @@ body {
 
   .stats-row {
     flex-direction: column;
+  }
+
+  .status-tabs {
+    display: flex;
+    width: 100%;
+  }
+
+  .status-tab {
+    flex: 1;
+    justify-content: center;
+    padding: 0.6rem 0.5rem;
+  }
+
+  .status-tab-label {
+    font-size: 0.8rem;
+  }
+
+  .actions-cell {
+    min-width: 160px;
   }
 
   .jobs-table {

@@ -171,30 +171,32 @@ function App() {
     switch (job.status as TriageStatus) {
       case 'new':
         return (
-          <>
-            <button type="button" className="triage-button" onClick={() => setJobStatus(job.id, 'interested')}>Interested</button>
-            <button type="button" className="triage-button" onClick={() => setJobStatus(job.id, 'applied')}>Applied</button>
-            <button type="button" className="triage-button triage-skip" onClick={() => setJobStatus(job.id, 'skipped')}>Skip</button>
-          </>
+          <div className="triage-group" role="group" aria-label="Triage">
+            <button type="button" className="triage-button triage-primary" onClick={() => setJobStatus(job.id, 'interested')}>Shortlist</button>
+            <button type="button" className="triage-button triage-secondary" onClick={() => setJobStatus(job.id, 'applied')}>Applied</button>
+            <button type="button" className="triage-button triage-ghost" onClick={() => setJobStatus(job.id, 'skipped')}>Skip</button>
+          </div>
         )
       case 'interested':
         return (
-          <>
-            <button type="button" className="triage-button" onClick={() => setJobStatus(job.id, 'applied')}>Applied</button>
-            <button type="button" className="triage-button triage-skip" onClick={() => setJobStatus(job.id, 'skipped')}>Skip</button>
-            <button type="button" className="triage-button triage-muted" onClick={() => setJobStatus(job.id, 'new')}>Back to New</button>
-          </>
+          <div className="triage-group" role="group" aria-label="Triage">
+            <button type="button" className="triage-button triage-primary" onClick={() => setJobStatus(job.id, 'applied')}>Mark applied</button>
+            <button type="button" className="triage-button triage-ghost" onClick={() => setJobStatus(job.id, 'skipped')}>Skip</button>
+            <button type="button" className="triage-button triage-ghost" onClick={() => setJobStatus(job.id, 'new')}>Undo</button>
+          </div>
         )
       case 'applied':
         return (
-          <>
-            <button type="button" className="triage-button triage-skip" onClick={() => setJobStatus(job.id, 'skipped')}>Skip</button>
-            <button type="button" className="triage-button triage-muted" onClick={() => setJobStatus(job.id, 'interested')}>Back to Interested</button>
-          </>
+          <div className="triage-group" role="group" aria-label="Triage">
+            <button type="button" className="triage-button triage-ghost" onClick={() => setJobStatus(job.id, 'interested')}>Back</button>
+            <button type="button" className="triage-button triage-ghost" onClick={() => setJobStatus(job.id, 'skipped')}>Skip</button>
+          </div>
         )
       case 'skipped':
         return (
-          <button type="button" className="triage-button" onClick={() => setJobStatus(job.id, 'new')}>Restore</button>
+          <div className="triage-group" role="group" aria-label="Triage">
+            <button type="button" className="triage-button triage-secondary" onClick={() => setJobStatus(job.id, 'new')}>Restore</button>
+          </div>
         )
       default:
         return null
@@ -252,35 +254,26 @@ function App() {
         </div>
       </header>
 
-      {stats && (
-        <div className="stats-row">
-          <div className="stat-card">
-            <div className="stat-value">{stats.by_status.new || 0}</div>
-            <div className="stat-label">New</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-value">{stats.by_status.interested || 0}</div>
-            <div className="stat-label">Interested</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-value">{stats.by_status.applied || 0}</div>
-            <div className="stat-label">Applied</div>
-          </div>
+      <div className="inbox-bar">
+        <div className="status-tabs" role="tablist" aria-label="Job status">
+          {STATUS_TABS.map(tab => {
+            const count = stats?.by_status[tab.key] || 0
+            const active = statusFilter === tab.key
+            return (
+              <button
+                key={tab.key}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                className={`status-tab status-tab--${tab.key} ${active ? 'active' : ''}`}
+                onClick={() => setStatusFilter(tab.key)}
+              >
+                <span className="status-tab-label">{tab.label}</span>
+                <span className="status-tab-count">{count}</span>
+              </button>
+            )
+          })}
         </div>
-      )}
-
-      <div className="status-tabs">
-        {STATUS_TABS.map(tab => (
-          <button
-            key={tab.key}
-            type="button"
-            className={`status-tab ${statusFilter === tab.key ? 'active' : ''}`}
-            onClick={() => setStatusFilter(tab.key)}
-          >
-            {tab.label}
-            <span className="status-tab-count">{stats?.by_status[tab.key] || 0}</span>
-          </button>
-        ))}
       </div>
 
       <div className="controls">
@@ -352,7 +345,7 @@ function App() {
                 <th onClick={() => toggleSort('posted_date')} className="sortable">
                   Posted {sortKey === 'posted_date' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
                 </th>
-                <th>Action</th>
+                <th className="actions-col">Triage</th>
               </tr>
             </thead>
             <tbody>
@@ -380,15 +373,15 @@ function App() {
                   <td>{effortLabel(job.effort_score)}</td>
                   <td>{job.source}</td>
                   <td>{new Date(job.posted_date).toLocaleDateString()}</td>
-                  <td>
+                  <td className="actions-cell">
                     <div className="row-actions">
                       <a
                         href={job.url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="apply-button"
+                        className="view-link"
                       >
-                        View
+                        Open
                       </a>
                       {triageActions(job)}
                     </div>
