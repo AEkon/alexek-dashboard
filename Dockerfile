@@ -27,6 +27,9 @@ RUN mkdir -p /app/data
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8000
+ENV DATABASE_PATH=/app/data/dashboard.db
+ENV SCRAPE_INTERVAL_MINUTES=60
+ENV SCRAPE_ON_STARTUP=1
 
 # Expose port
 EXPOSE 8000

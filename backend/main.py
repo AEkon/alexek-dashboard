@@ -1,13 +1,16 @@
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
 from fastapi.responses import JSONResponse, FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+import asyncio
 import sqlite3
 import os
 from datetime import datetime, timedelta
 from typing import Optional
 from urllib.parse import quote
 
-from db import init_db, is_scraper_running, log_scrape_start, log_scrape_end
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+from db import default_db_path, init_db, is_scraper_running, log_scrape_start, log_scrape_end
 from scrapers import squarespace_jobs
 from auth import (
     COOKIE_NAME,
@@ -28,6 +31,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Global database connection
 db: Optional[sqlite3.Connection] = None
+scheduler = AsyncIOScheduler()
 
 PUBLIC_PATHS = {"/health", "/login", "/api/login"}
 
@@ -59,14 +63,58 @@ async def password_protect(request: Request, call_next):
         next_url = f"{next_url}?{request.url.query}"
     return RedirectResponse(url=f"/login?next={quote(next_url, safe='')}", status_code=303)
 
+async def scheduled_refresh_jobs():
+    """Periodic Freelancer scrape (skips if a run is already in progress)."""
+    global db
+    if not db:
+        return
+    if is_scraper_running(db, "jobs"):
+        print("Scheduled scrape skipped: already running")
+        return
+    print("Scheduled job scrape starting...")
+    await refresh_jobs_background(db)
+
+
 @app.on_event("startup")
 async def startup():
-    """Initialize database on startup."""
+    """Initialize database and scrape scheduler."""
     global db
     try:
+        db_path = default_db_path()
         print("Starting Squarespace Job Dashboard API...")
-        db = init_db()
+        print(f"Database path: {db_path}")
+        db = init_db(db_path)
+
+        # Clear scrapes interrupted by a previous process crash/redeploy
+        db.execute(
+            """UPDATE scrape_log
+               SET status = 'failed',
+                   finished_at = ?,
+                   error = COALESCE(error, 'interrupted by restart')
+               WHERE status = 'running'""",
+            (datetime.utcnow().isoformat(),),
+        )
+        db.commit()
         print("Database initialized successfully")
+
+        interval = int(os.getenv("SCRAPE_INTERVAL_MINUTES", "60"))
+        if interval > 0:
+            scheduler.add_job(
+                scheduled_refresh_jobs,
+                "interval",
+                minutes=interval,
+                id="jobs_scrape",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+            )
+            scheduler.start()
+            print(f"Scrape scheduler started: every {interval} minute(s)")
+            if os.getenv("SCRAPE_ON_STARTUP", "1") == "1":
+                asyncio.create_task(scheduled_refresh_jobs())
+        else:
+            print("Scrape scheduler disabled (SCRAPE_INTERVAL_MINUTES=0)")
+
         print("API ready to serve requests")
     except Exception as e:
         print(f"Startup error: {e}")
@@ -74,15 +122,22 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
-    """Close database connection on shutdown."""
+    """Stop scheduler and close database connection."""
     global db
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
     if db:
         db.close()
 
 @app.get("/health")
 async def health():
     """Health check endpoint."""
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+    return {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "database": default_db_path(),
+        "scrape_interval_minutes": int(os.getenv("SCRAPE_INTERVAL_MINUTES", "60")),
+    }
 
 @app.get("/login")
 async def login_page(request: Request):

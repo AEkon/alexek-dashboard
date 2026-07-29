@@ -1,10 +1,26 @@
+import os
 import sqlite3
 from datetime import datetime
 from typing import Optional
 
-def get_db(db_path: str = "dashboard.db") -> sqlite3.Connection:
+def default_db_path() -> str:
+    """Prefer DATABASE_PATH, then /app/data (Docker/Railway volume), else local file."""
+    env = os.getenv("DATABASE_PATH")
+    if env:
+        return env
+    if os.path.isdir("/app/data"):
+        return "/app/data/dashboard.db"
+    return "dashboard.db"
+
+
+def get_db(db_path: Optional[str] = None) -> sqlite3.Connection:
     """Get a database connection with proper configuration."""
-    conn = sqlite3.connect(db_path, timeout=30)
+    path = db_path or default_db_path()
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    # check_same_thread=False: shared conn used by API + background scheduler
+    conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=30000")
@@ -117,7 +133,7 @@ def migrate(conn: sqlite3.Connection) -> None:
 
     conn.commit()
 
-def init_db(db_path: str = "dashboard.db") -> sqlite3.Connection:
+def init_db(db_path: Optional[str] = None) -> sqlite3.Connection:
     """Initialize the database and return connection."""
     conn = get_db(db_path)
     migrate(conn)
