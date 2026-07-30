@@ -59,16 +59,25 @@ export default function Forum() {
   const [refreshing, setRefreshing] = useState(false)
   const [expandedId, setExpandedId] = useState<number | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
 
   const fetchQuestions = useCallback(async () => {
+    setLoading(true)
+    setError(null)
     try {
       const res = await fetch(`/api/forum/questions?status=${activeTab}&limit=50`)
       if (res.ok) {
         const data = await res.json()
         setQuestions(data)
+      } else {
+        setError(`Failed to fetch questions: ${res.status}`)
       }
     } catch (e) {
       console.error('Failed to fetch questions:', e)
+      setError('Failed to connect to server')
+    } finally {
+      setLoading(false)
     }
   }, [activeTab])
 
@@ -142,105 +151,126 @@ export default function Forum() {
       <header className="section-header">
         <h2>Forum Monitor</h2>
         <button
-          className="refresh-btn"
+          className="refresh-button"
           onClick={handleRefresh}
           disabled={refreshing}
         >
-          {refreshing ? '↻' : '⟳'}
+          {refreshing ? '↻' : '⟳'} Refresh
         </button>
       </header>
 
-      <div className="stats-bar">
-        {STATUS_TABS.map(tab => (
-          <button
-            key={tab.key}
-            className={`tab ${activeTab === tab.key ? 'active' : ''}`}
-            onClick={() => setActiveTab(tab.key)}
-          >
-            {tab.label} ({tabCount(tab.key)})
-          </button>
-        ))}
+      <div className="inbox-bar">
+        <div className="status-tabs" role="tablist" aria-label="Forum status">
+          {STATUS_TABS.map(tab => {
+            const count = tabCount(tab.key)
+            const active = activeTab === tab.key
+            return (
+              <button
+                key={tab.key}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                className={`status-tab status-tab--${tab.key} ${active ? 'active' : ''}`}
+                onClick={() => setActiveTab(tab.key)}
+              >
+                <span className="status-tab-label">{tab.label}</span>
+                <span className="status-tab-count">{count}</span>
+              </button>
+            )
+          })}
+        </div>
       </div>
 
-      <div className="search-bar">
+      <div className="controls">
         <input
           type="text"
           placeholder="Search questions..."
+          className="search-input"
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
         />
       </div>
 
-      {filteredQuestions.length === 0 ? (
-        <div className="empty-state">
+      {error && (
+        <div className="error-message">
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="loading">Loading forum questions...</div>
+      ) : filteredQuestions.length === 0 ? (
+        <div className="no-results">
           <p>{EMPTY_COPY[activeTab]}</p>
         </div>
       ) : (
-        <div className="questions-list">
-          {filteredQuestions.map(question => (
-            <div key={question.id} className="question-card">
-              <div className="question-header">
-                <h3
-                  className="question-title"
+        <div className="jobs-table-container">
+          <table className="jobs-table">
+            <thead>
+              <tr>
+                <th onClick={() => {/* TODO: Add sorting */}} className="sortable">
+                  Title {'▲'}
+                </th>
+                <th>Source</th>
+                <th>Comments</th>
+                <th>Time</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredQuestions.map(question => (
+                <tr
+                  key={question.id}
+                  className={expandedId === question.id ? 'focused' : ''}
                   onClick={() => setExpandedId(expandedId === question.id ? null : question.id)}
                 >
-                  {question.title}
-                  <span className="expand-icon">
-                    {expandedId === question.id ? '▼' : '▶'}
-                  </span>
-                </h3>
-                <div className="question-meta">
-                  <span className="source-badge">{question.source}</span>
-                  <span className="comments">{question.comments_count} comments</span>
-                  <span className="time">{formatRelativeTime(question.created_at)}</span>
-                </div>
-              </div>
-
-              {expandedId === question.id && (
-                <div className="question-details">
-                  <p className="description">{question.description}</p>
-
-                  {question.ai_answer && (
-                    <div className="ai-answer">
-                      <h4>AI Suggested Answer:</h4>
-                      <p>{question.ai_answer}</p>
-                    </div>
-                  )}
-
-                  <div className="question-actions">
-                    <a
-                      href={question.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="action-btn primary"
-                    >
-                      Answer on Forum →
+                  <td className="title-cell">
+                    <div className="job-title">{question.title}</div>
+                    {expandedId === question.id && (
+                      <div className="job-description">
+                        <p>{question.description}</p>
+                        {question.ai_answer && (
+                          <div className="ai-answer-box">
+                            <strong>AI Answer:</strong>
+                            <p>{question.ai_answer}</p>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </td>
+                  <td>
+                    <span className="source-badge">{question.source}</span>
+                  </td>
+                  <td>{question.comments_count}</td>
+                  <td>{formatRelativeTime(question.created_at)}</td>
+                  <td className="row-actions" onClick={(e) => e.stopPropagation()}>
+                    <a href={question.url} target="_blank" rel="noopener noreferrer" className="view-link">
+                      Open
                     </a>
-
                     {question.status === 'new' && (
                       <>
                         <button
-                          className="action-btn"
+                          className="triage-button triage-secondary"
                           onClick={() => {
                             const answerUrl = prompt('Enter your forum answer URL:')
                             if (answerUrl) handleMarkAnswered(question.id, answerUrl)
                           }}
                         >
-                          Mark Answered
+                          Answered
                         </button>
                         <button
-                          className="action-btn secondary"
+                          className="triage-button triage-ghost"
                           onClick={() => handleArchive(question.id)}
                         >
                           Archive
                         </button>
                       </>
                     )}
-                  </div>
-                </div>
-              )}
-            </div>
-          ))}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
     </div>
