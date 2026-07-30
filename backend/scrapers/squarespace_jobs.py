@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Tuple
 import html
 
 from db import purge_stale_data
+from notify import notify_new_high_score_jobs
 
 USER_AGENT = "alexek-dashboard/1.0 (+https://hq.alexek.com)"
 DESCRIPTION_SNIPPET_LEN = 400
@@ -260,8 +261,8 @@ def upsert_job(
     budget_mid_usd: Optional[int] = None,
     effort_score: Optional[int] = None,
     priority_score: Optional[float] = None,
-) -> bool:
-    """Insert or update a job. Preserves triage status. Returns True if a row was written."""
+) -> str:
+    """Insert or update a job. Preserves triage status. Returns inserted|updated|noop."""
     snippet = (description or "")[:DESCRIPTION_SNIPPET_LEN]
     now = datetime.utcnow().isoformat()
 
@@ -290,7 +291,7 @@ def upsert_job(
             and existing["priority_score"] == priority_score
         )
         if same:
-            return False
+            return "noop"
 
         # Never overwrite triage status on scrape updates
         db.execute(
@@ -319,7 +320,7 @@ def upsert_job(
                 source_id,
             ),
         )
-        return True
+        return "updated"
 
     db.execute(
         """
@@ -351,11 +352,11 @@ def upsert_job(
             priority_score,
         ),
     )
-    return True
+    return "inserted"
 
 
-async def scrape_freelancer_rss(db) -> int:
-    """Scrape Freelancer.com public RSS for Squarespace projects."""
+async def scrape_freelancer_rss(db):
+    """Scrape Freelancer.com public RSS for Squarespace projects. Returns (rows, new_jobs)."""
     async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
         resp = await client.get(FREELANCER_RSS_URL)
 
@@ -372,6 +373,7 @@ async def scrape_freelancer_rss(db) -> int:
         raise Exception(f"Freelancer RSS parse failed: {getattr(feed, 'bozo_exception', 'unknown')}")
 
     rows = 0
+    new_jobs = []
     for entry in feed.entries[:50]:
         title = clean_html(entry.get("title", ""))
         description = clean_html(entry.get("summary") or entry.get("description", ""))
@@ -402,7 +404,7 @@ async def scrape_freelancer_rss(db) -> int:
         else:
             source_id = re.sub(r"[^\w-]", "", link.rstrip("/").split("/")[-1])[:80] or link[-50:]
 
-        if upsert_job(
+        action = upsert_job(
             db,
             source="freelancer",
             source_id=source_id,
@@ -419,11 +421,19 @@ async def scrape_freelancer_rss(db) -> int:
             budget_mid_usd=mid_usd,
             effort_score=effort,
             priority_score=priority,
-        ):
+        )
+        if action != "noop":
             rows += 1
+        if action == "inserted":
+            new_jobs.append({
+                "title": title,
+                "url": link,
+                "budget": str(budget_info["budget"]) if budget_info else None,
+                "priority_score": priority,
+            })
 
     db.commit()
-    return rows
+    return rows, new_jobs
 
 
 def upwork_configured() -> bool:
@@ -506,6 +516,7 @@ async def scrape_upwork_graphql(db) -> int:
         )
 
     rows = 0
+    new_jobs = []
     for edge in edges[:50]:
         node = edge.get("node") or {}
         title = clean_html(node.get("title") or "")
@@ -525,7 +536,7 @@ async def scrape_upwork_graphql(db) -> int:
         priority = compute_priority(mid_usd, effort)
         job_type = "short-term" if is_short_term_job(title, description) or effort <= 3 else "unknown"
 
-        if upsert_job(
+        action = upsert_job(
             db,
             source="upwork",
             source_id=job_id[:80],
@@ -542,26 +553,38 @@ async def scrape_upwork_graphql(db) -> int:
             budget_mid_usd=mid_usd,
             effort_score=effort,
             priority_score=priority,
-        ):
+        )
+        if action != "noop":
             rows += 1
+        if action == "inserted":
+            new_jobs.append({
+                "title": title,
+                "url": url,
+                "budget": str(budget_info["budget"]) if budget_info else None,
+                "priority_score": priority,
+            })
 
     db.commit()
-    return rows
+    return rows, new_jobs
 
 
 async def scrape_all(db) -> Dict[str, object]:
-    """Run configured sources independently; collect counts and errors."""
+    """Run configured sources independently; collect counts, new jobs, and errors."""
     results: Dict[str, object] = {
         "freelancer": 0,
         "upwork": 0,
         "total": 0,
         "errors": [],
         "skipped": [],
+        "new_jobs": [],
     }
     errors: List[str] = []
+    new_jobs: List[dict] = []
 
     try:
-        results["freelancer"] = await scrape_freelancer_rss(db)
+        count, jobs = await scrape_freelancer_rss(db)
+        results["freelancer"] = count
+        new_jobs.extend(jobs)
     except Exception as e:
         msg = f"freelancer: {e}"
         errors.append(msg)
@@ -569,7 +592,9 @@ async def scrape_all(db) -> Dict[str, object]:
 
     if upwork_configured():
         try:
-            results["upwork"] = await scrape_upwork_graphql(db)
+            count, jobs = await scrape_upwork_graphql(db)
+            results["upwork"] = count
+            new_jobs.extend(jobs)
         except Exception as e:
             msg = f"upwork: {e}"
             errors.append(msg)
@@ -579,6 +604,7 @@ async def scrape_all(db) -> Dict[str, object]:
 
     results["total"] = int(results["freelancer"] or 0) + int(results["upwork"] or 0)
     results["errors"] = errors
+    results["new_jobs"] = new_jobs
     return results
 
 
@@ -597,4 +623,9 @@ async def scrape(db) -> Tuple[int, Optional[str]]:
         raise Exception(error_msg or "All job sources failed")
 
     purge_stale_data(db)
+
+    alert_err = await notify_new_high_score_jobs(list(results.get("new_jobs") or []))
+    if alert_err:
+        error_msg = f"{error_msg}; alerts: {alert_err}" if error_msg else f"alerts: {alert_err}"
+
     return total, error_msg
