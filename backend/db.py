@@ -190,7 +190,7 @@ def purge_stale_data(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """DELETE FROM jobs
-           WHERE status IN ('skipped', 'archived')
+           WHERE status IN ('skipped', 'archived', 'gone')
              AND COALESCE(updated_at, created_at) < ?""",
         (cutoff_discard,),
     )

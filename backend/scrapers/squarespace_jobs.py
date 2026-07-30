@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Tuple
 import html
 
 from db import purge_stale_data
+from availability import mark_unavailable_jobs
 from notify import alert_min_score, notify_new_high_score_jobs
 
 USER_AGENT = "alexek-dashboard/1.0 (+https://hq.alexek.com)"
@@ -639,6 +640,12 @@ async def scrape(db) -> Tuple[int, Optional[str]]:
         raise Exception(error_msg or "All job sources failed")
 
     purge_stale_data(db)
+
+    gone_count, avail_warn = await mark_unavailable_jobs(db)
+    if avail_warn:
+        error_msg = f"{error_msg}; {avail_warn}" if error_msg else avail_warn
+    if gone_count:
+        print(f"Marked {gone_count} job(s) as gone")
 
     alert_err = await notify_new_high_score_jobs(list(results.get("new_jobs") or []))
     if alert_err:

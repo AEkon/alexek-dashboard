@@ -281,7 +281,7 @@ async def refresh_posts_background(conn: sqlite3.Connection):
         log_scrape_end(conn, log_id, "failed", error=str(e))
 
 CLOSED_JOB_STATUSES = ("won", "lost", "no_reply")
-ALLOWED_JOB_STATUSES = {"new", "interested", "applied", "skipped", "archived", *CLOSED_JOB_STATUSES}
+ALLOWED_JOB_STATUSES = {"new", "interested", "applied", "skipped", "archived", "gone", *CLOSED_JOB_STATUSES}
 QUERY_JOB_STATUSES = ALLOWED_JOB_STATUSES | {"closed"}
 
 
