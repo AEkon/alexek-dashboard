@@ -4,11 +4,13 @@ FROM python:3.12-slim
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies including Node.js for frontend build
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
     curl \
+    nodejs \
+    npm \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
@@ -28,8 +30,15 @@ RUN mkdir -p /app/models && \
 # Copy backend application
 COPY backend/ .
 
-# Copy frontend static files
-COPY static/ ./static/
+# Build frontend
+COPY frontend/package*.json ./frontend/
+RUN cd frontend && npm install
+
+COPY frontend/ ./frontend/
+RUN cd frontend && npm run build
+
+# Copy frontend static files to static directory for serving
+RUN cp -r frontend/dist/* static/
 
 # Create directory for database
 RUN mkdir -p /app/data
