@@ -24,6 +24,64 @@ body {
 }
 
 /* Dashboard layout */
+.app {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 1.5rem;
+  min-height: 100vh;
+}
+
+.app-header {
+  margin-bottom: 2rem;
+  padding-bottom: 1rem;
+  border-bottom: 2px solid var(--color-primary);
+}
+
+.app-header h1 {
+  color: var(--color-primary);
+  font-size: 1.8rem;
+  font-weight: 700;
+  margin-bottom: 1rem;
+}
+
+/* Main navigation */
+.main-nav {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.nav-button {
+  background-color: white;
+  color: var(--color-text);
+  border: 2px solid var(--color-border);
+  padding: 0.75rem 1.5rem;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 1rem;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+
+.nav-button:hover {
+  border-color: var(--color-accent);
+  background-color: rgba(42, 157, 143, 0.05);
+}
+
+.nav-button.active {
+  background-color: var(--color-primary);
+  border-color: var(--color-primary);
+  color: white;
+}
+
+.app-main {
+  display: flex;
+  flex-direction: column;
+}
+
+.dashboard-section {
+  flex: 1;
+}
+
 .dashboard {
   max-width: 1400px;
   margin: 0 auto;
@@ -998,6 +1056,7 @@ a.apply-drawer-open {
     width: 100%;
     flex-wrap: wrap;
   }
+}
 
 /* ====================
    Forum Component Styles
@@ -1064,4 +1123,44 @@ a.apply-drawer-open {
   opacity: 0.9;
   font-size: 0.95rem;
 }
+
+/* Section headers */
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+  padding-bottom: 1rem;
+  border-bottom: 2px solid var(--color-border);
+}
+
+.section-header h2 {
+  color: var(--color-primary);
+  font-size: 1.3rem;
+  font-weight: 600;
+  margin: 0;
+}
+
+/* Jobs section specific styles */
+.jobs-section .source-badge {
+  background-color: rgba(42, 157, 143, 0.1);
+  color: var(--color-accent);
+  padding: 0.2rem 0.5rem;
+  border-radius: 3px;
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+.jobs-section .type-badge {
+  background-color: rgba(114, 47, 55, 0.1);
+  color: var(--color-primary);
+  padding: 0.2rem 0.5rem;
+  border-radius: 3px;
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+/* Forum section specific styles */
+.forum-section {
+  /* Inherits existing styles */
 }
