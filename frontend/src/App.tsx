@@ -5,6 +5,7 @@ import {
   PROPOSAL_KINDS,
   type ProposalKind,
 } from './proposal'
+import Forum from './Forum'
 
 // Callers: main.tsx. API: GET/PATCH /api/jobs (+ earnings_usd), /api/jobs/stats (+ weekly_revenue_usd).
 // Schema: jobs.earnings_usd; stats.weekly_revenue_usd.
@@ -42,7 +43,7 @@ interface JobsStats {
 }
 
 type JobStatus = 'new' | 'interested' | 'applied' | 'skipped' | 'won' | 'lost' | 'no_reply'
-type TabKey = 'new' | 'interested' | 'applied' | 'closed' | 'skipped'
+type TabKey = 'new' | 'interested' | 'applied' | 'closed' | 'skipped' | 'forum'
 type OutcomeFilter = 'won' | 'lost' | 'no_reply'
 type Density = 'comfortable' | 'compact'
 
@@ -52,6 +53,7 @@ const STATUS_TABS: { key: TabKey; label: string }[] = [
   { key: 'applied', label: 'Applied' },
   { key: 'closed', label: 'Closed' },
   { key: 'skipped', label: 'Skipped' },
+  { key: 'forum', label: 'Forum' },
 ]
 
 const OUTCOME_PILLS: { key: OutcomeFilter; label: string }[] = [
@@ -68,6 +70,7 @@ const EMPTY_COPY: Record<TabKey, string> = {
   applied: 'No open bids. Use Apply on New/Interested, then track outcomes here.',
   closed: 'No outcomes yet — mark Applied jobs Won, Lost, or No reply when you hear back.',
   skipped: 'No skipped jobs. Skipped items are purged after a week.',
+  forum: 'Forum questions are loaded in the Forum section.',
 }
 
 function tabCount(stats: JobsStats | null, key: TabKey): number {
@@ -676,6 +679,8 @@ function App() {
 
       {loading ? (
         <div className="loading">Loading jobs...</div>
+      ) : statusFilter === 'forum' ? (
+        <Forum />
       ) : (
         <>
           <div className="jobs-table-container desktop-only">

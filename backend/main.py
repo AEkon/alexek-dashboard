@@ -11,7 +11,7 @@ from urllib.parse import quote
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from db import default_db_path, init_db, is_scraper_running, log_scrape_start, log_scrape_end
-from scrapers import squarespace_jobs
+from scrapers import squarespace_jobs, forum_questions
 from auth import (
     COOKIE_NAME,
     auth_configured,
@@ -112,6 +112,22 @@ async def startup():
             print(f"Scrape scheduler started: every {interval} minute(s)")
             if os.getenv("SCRAPE_ON_STARTUP", "1") == "1":
                 asyncio.create_task(scheduled_refresh_jobs())
+
+            # Add forum refresh scheduler
+            forum_interval = int(os.getenv("FORUM_SCRAPE_INTERVAL_MINUTES", "30"))
+            if forum_interval > 0 and os.getenv("FORUM_RSS_URL"):
+                scheduler.add_job(
+                    scheduled_refresh_forum,
+                    "interval",
+                    minutes=forum_interval,
+                    id="forum_scrape",
+                    replace_existing=True,
+                    max_instances=1,
+                    coalesce=True,
+                )
+                print(f"Forum scraper started: every {forum_interval} minute(s)")
+                if os.getenv("FORUM_SCRAPE_ON_STARTUP", "1") == "1":
+                    asyncio.create_task(scheduled_refresh_forum())
         else:
             print("Scrape scheduler disabled (SCRAPE_INTERVAL_MINUTES=0)")
 
@@ -470,6 +486,18 @@ async def refresh_jobs_background(conn: sqlite3.Connection):
     except Exception as e:
         log_scrape_end(conn, log_id, "failed", error=str(e))
 
+async def refresh_forum_background(conn: sqlite3.Connection):
+    """Background task to refresh forum questions."""
+    try:
+        await forum_questions.scrape(conn)
+    except Exception as e:
+        print(f"Forum refresh failed: {e}")
+
+async def scheduled_refresh_forum():
+    """Scheduled task to refresh forum questions."""
+    if db:
+        await refresh_forum_background(db)
+
 @app.get("/api/jobs/stats")
 async def get_jobs_stats():
     """Get statistics about Squarespace jobs."""
@@ -523,6 +551,100 @@ async def get_jobs_stats():
         "by_type": {row["job_type"]: row["count"] for row in type_counts},
         "recent_7days": recent_count,
         "weekly_revenue_usd": weekly_revenue,
+    }
+
+@app.get("/api/forum/questions")
+async def get_forum_questions(
+    status: str = "new",
+    source: Optional[str] = None,
+    limit: int = 50
+):
+    """Get forum questions with filtering."""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    query = "SELECT * FROM forum_questions WHERE status = ?"
+    params = [status]
+
+    if source:
+        query += " AND source = ?"
+        params.append(source)
+
+    query += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+
+    questions = db.execute(query, params).fetchall()
+    return [dict(q) for q in questions]
+
+@app.post("/api/forum/refresh")
+async def refresh_forum(background_tasks: BackgroundTasks):
+    """Trigger forum scraping in background."""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    if is_scraper_running(db, "forum_questions"):
+        return {"status": "already_running"}
+
+    background_tasks.add_task(forum_questions.scrape, db)
+    return {"status": "refreshing"}
+
+@app.patch("/api/forum/questions/{question_id}")
+async def update_forum_question(question_id: int, updates: dict):
+    """Update forum question status or add answer URL."""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    # Validate question exists
+    question = db.execute("SELECT id FROM forum_questions WHERE id = ?", (question_id,)).fetchone()
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    # Build update dynamically
+    allowed_fields = ["status", "answered_at", "answer_url", "comments_count"]
+    update_parts = []
+    params = []
+
+    for field in allowed_fields:
+        if field in updates:
+            update_parts.append(f"{field} = ?")
+            params.append(updates[field])
+
+    if not update_parts:
+        raise HTTPException(status_code=400, detail="No valid fields to update")
+
+    params.append(question_id)
+    db.execute(
+        f"UPDATE forum_questions SET {', '.join(update_parts)}, updated_at = ? WHERE id = ?",
+        params + [datetime.utcnow().isoformat()]
+    )
+    db.commit()
+
+    return {"status": "updated"}
+
+@app.get("/api/forum/stats")
+async def get_forum_stats():
+    """Get forum statistics."""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    # Get counts by status
+    status_counts = db.execute("""
+        SELECT status, COUNT(*) as count
+        FROM forum_questions
+        GROUP BY status
+    """).fetchall()
+
+    # Get counts by source
+    source_counts = db.execute("""
+        SELECT source, COUNT(*) as count
+        FROM forum_questions
+        WHERE status = 'new'
+        GROUP BY source
+    """).fetchall()
+
+    return {
+        "by_status": {row["status"]: row["count"] for row in status_counts},
+        "by_source": {row["source"]: row["count"] for row in source_counts},
     }
 
 @app.get("/api/scrape-log")

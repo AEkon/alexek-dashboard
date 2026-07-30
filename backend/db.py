@@ -96,6 +96,25 @@ def migrate(conn: sqlite3.Connection) -> None:
             UNIQUE(source, source_id)
         )""",
 
+        # Forum questions table - forum monitoring with AI answers
+        """CREATE TABLE IF NOT EXISTS forum_questions (
+            id INTEGER PRIMARY KEY,
+            source TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT,
+            url TEXT NOT NULL,
+            comments_count INTEGER DEFAULT 0,
+            ai_answer TEXT,
+            answer_generated_at TEXT,
+            status TEXT DEFAULT 'new',
+            answered_at TEXT,
+            answer_url TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT,
+            UNIQUE(source, source_id)
+        )""",
+
         # Indexes for performance
         "CREATE INDEX IF NOT EXISTS idx_respondables_status ON respondables(status)",
         "CREATE INDEX IF NOT EXISTS idx_respondables_source ON respondables(source)",
@@ -105,6 +124,9 @@ def migrate(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)",
         "CREATE INDEX IF NOT EXISTS idx_jobs_source ON jobs(source)",
         "CREATE INDEX IF NOT EXISTS idx_jobs_posted_date ON jobs(posted_date)",
+        "CREATE INDEX IF NOT EXISTS idx_forum_questions_status ON forum_questions(status)",
+        "CREATE INDEX IF NOT EXISTS idx_forum_questions_source ON forum_questions(source)",
+        "CREATE INDEX IF NOT EXISTS idx_forum_questions_comments_count ON forum_questions(comments_count)",
     ]
 
     for sql in migrations:
