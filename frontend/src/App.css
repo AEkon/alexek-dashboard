@@ -874,11 +874,16 @@ a.apply-drawer-open {
   font-size: 0.7rem;
 }
 
-.desktop-only { display: block; }
-.mobile-only { display: none; }
+/* Hide mobile cards on desktop — must beat later flex rules on .jobs-cards */
+.desktop-only {
+  display: block;
+}
+
+.mobile-only {
+  display: none !important;
+}
 
 .jobs-cards {
-  display: flex;
   flex-direction: column;
   gap: 0.75rem;
 }
@@ -930,8 +935,13 @@ a.apply-drawer-open {
 }
 
 @media (max-width: 768px) {
-  .desktop-only { display: none !important; }
-  .mobile-only { display: flex !important; }
+  .desktop-only {
+    display: none !important;
+  }
+
+  .mobile-only {
+    display: flex !important;
+  }
 
   .keyboard-hint { display: none; }
 
