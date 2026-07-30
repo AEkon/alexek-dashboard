@@ -43,7 +43,8 @@ interface JobsStats {
 }
 
 type JobStatus = 'new' | 'interested' | 'applied' | 'skipped' | 'won' | 'lost' | 'no_reply'
-type TabKey = 'new' | 'interested' | 'applied' | 'closed' | 'skipped' | 'forum'
+type TabKey = 'new' | 'interested' | 'applied' | 'closed' | 'skipped'
+type SectionKey = 'jobs' | 'forum'
 type OutcomeFilter = 'won' | 'lost' | 'no_reply'
 type Density = 'comfortable' | 'compact'
 
@@ -53,6 +54,10 @@ const STATUS_TABS: { key: TabKey; label: string }[] = [
   { key: 'applied', label: 'Applied' },
   { key: 'closed', label: 'Closed' },
   { key: 'skipped', label: 'Skipped' },
+]
+
+const SECTION_TABS: { key: SectionKey; label: string }[] = [
+  { key: 'jobs', label: 'Jobs' },
   { key: 'forum', label: 'Forum' },
 ]
 
@@ -70,7 +75,6 @@ const EMPTY_COPY: Record<TabKey, string> = {
   applied: 'No open bids. Use Apply on New/Interested, then track outcomes here.',
   closed: 'No outcomes yet — mark Applied jobs Won, Lost, or No reply when you hear back.',
   skipped: 'No skipped jobs. Skipped items are purged after a week.',
-  forum: 'Forum questions are loaded in the Forum section.',
 }
 
 function tabCount(stats: JobsStats | null, key: TabKey): number {
@@ -126,6 +130,7 @@ function App() {
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [statusFilter, setStatusFilter] = useState<TabKey>('new')
+  const [activeSection, setActiveSection] = useState<SectionKey>('jobs')
   const [outcomeFilter, setOutcomeFilter] = useState<OutcomeFilter | null>(null)
 
   const [jobTypeFilter, setJobTypeFilter] = useState<string | null>(null)
@@ -582,6 +587,27 @@ function App() {
         </div>
       </header>
 
+      <div className="section-navigation">
+        <div className="section-tabs" role="tablist" aria-label="Dashboard section">
+          {SECTION_TABS.map(section => {
+            const active = activeSection === section.key
+            return (
+              <button
+                key={section.key}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                className={`section-tab section-tab--${section.key} ${active ? 'active' : ''}`}
+                onClick={() => setActiveSection(section.key)}
+              >
+                <span className="section-tab-label">{section.label}</span>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+
+      {activeSection === 'jobs' && (
       <div className="inbox-bar">
         <div className="status-tabs" role="tablist" aria-label="Job status">
           {STATUS_TABS.map(tab => {
@@ -679,7 +705,7 @@ function App() {
 
       {loading ? (
         <div className="loading">Loading jobs...</div>
-      ) : statusFilter === 'forum' ? (
+      ) : activeSection === 'forum' ? (
         <Forum />
       ) : (
         <>
@@ -836,6 +862,7 @@ function App() {
             </div>
           )}
         </>
+      )}
       )}
 
       {applyJob && (
