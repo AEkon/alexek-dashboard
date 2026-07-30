@@ -56,38 +56,60 @@ def generate_ai_answer(question: Dict) -> Optional[str]:
         description = question.get("description", "")
         url = question.get("url", "")
 
-        prompt = f"""Act as Squarespace developer. Provide a 1-line solution with simplified CSS/JS code if needed. Include the URL: {url}"""
+        # Create a simple prompt based on the question content
+        question_text = f"{title}. {description[:200]}".strip() if description else title
+        prompt = f"""As a Squarespace expert, provide a brief, helpful answer to this forum question: "{question_text}"
+
+If the question is about CSS/JS code, provide a simple solution. If it's about design/configuration, give clear guidance.
+Keep your answer under 2 sentences and be practical."""
 
         # Initialize model (lazy load - only for first call)
         if not hasattr(generate_ai_answer, '_model'):
-            generate_ai_answer._model = Llama(
-                model_path=model_path,
-                n_ctx=512,
-                n_threads=2,
-                verbose=False
-            )
+            try:
+                generate_ai_answer._model = Llama(
+                    model_path=model_path,
+                    n_ctx=512,
+                    n_threads=2,
+                    verbose=False
+                )
+                print("Local AI model loaded successfully")
+            except Exception as model_error:
+                print(f"Failed to load AI model: {model_error}")
+                return None
 
         model = generate_ai_answer._model
 
-        # Generate response
-        response = model(
-            prompt,
-            max_tokens=300,
-            temperature=0.7,
-            stop=["\n\n\n", "###", "User:"],
-            echo=False
-        )
+        # Generate response with proper error handling
+        try:
+            response = model(
+                prompt,
+                max_tokens=150,
+                temperature=0.6,
+                stop=["\n\n\n", "###", "User:", "Question:"],
+                echo=False
+            )
 
-        if response and 'choices' in response and len(response['choices']) > 0:
-            return response['choices'][0]['text'].strip()
+            if response and hasattr(response, 'choices') and len(response['choices']) > 0:
+                answer = response['choices'][0]['text'].strip()
+                if answer and len(answer) > 10:  # Ensure meaningful answer
+                    return answer
+                else:
+                    print("Generated answer too short or empty")
+                    return None
+            else:
+                print("Unexpected response format from model")
+                return None
+
+        except Exception as generation_error:
+            print(f"Model generation failed: {generation_error}")
+            return None
 
     except ImportError:
         print("llama-cpp-python not installed - AI answers disabled")
         return None
     except Exception as e:
         print(f"Local AI generation failed: {e}")
-
-    return None
+        return None
 
 async def upsert_question(db, question_data: Dict) -> str:
     """Insert or update forum question."""
@@ -162,17 +184,29 @@ async def scrape_forum_rss(db, rss_url: str, source_name: str, client: httpx.Asy
             comments = 0
 
             # Try to get comment count from various RSS fields
+            comments = 0
+            comments_unknown = False
+
             if hasattr(entry, 'slash_comments'):
-                comments = int(entry.slash_comments) if entry.slash_comments else 0
+                try:
+                    comments = int(entry.slash_comments) if entry.slash_comments else 0
+                except (ValueError, TypeError):
+                    comments_unknown = True
             elif hasattr(entry, 'wfw_commentrss'):
-                # Has comment RSS but no count - need to scrape
-                comments = -1  # Unknown, will check page
+                # Has comment RSS but no count - mark as unknown
+                comments_unknown = True
             elif 'comment_count' in entry:
-                comments = int(entry.comment_count) if entry.comment_count else 0
+                try:
+                    comments = int(entry.comment_count) if entry.comment_count else 0
+                except (ValueError, TypeError):
+                    comments_unknown = True
+            else:
+                # No comment information available - assume 0 to avoid missing questions
+                comments_unknown = True
 
             # Log first entry to debug RSS structure
             if rows == 0:
-                print(f"RSS Entry debug: title={title[:30]}, link={link[:50]}, comments={comments}")
+                print(f"RSS Entry debug: title={title[:30]}, link={link[:50]}, comments={comments}, unknown={comments_unknown}")
                 print(f"Available fields: {list(entry.keys())}")
 
             published = entry.get("published") or entry.get("updated") or datetime.utcnow().isoformat()
@@ -184,13 +218,16 @@ async def scrape_forum_rss(db, rss_url: str, source_name: str, client: httpx.Asy
             if not is_forum_question(title, description):
                 continue
 
-            # Skip if we know there are comments (when count > 0)
-            if comments > 0:
+            # Only skip if we're certain there are comments (> 0)
+            # Include all posts where we don't know the count or it's 0
+            if not comments_unknown and comments > 0:
                 continue
 
-            # For unknown comment counts, we'll include them and check the page later
-            if comments == -1:
-                print(f"Unknown comment count for: {title[:40]} - will check page")
+            # For unknown comment counts, assume 0 and let the user verify
+            if comments_unknown:
+                comments = 0
+                if rows == 0:  # Only log once
+                    print(f"Unknown comment count for: {title[:40]} - assuming 0, will be verified by user")
 
             # Generate source_id from URL
             source_id = re.sub(r"[^\w-]", "", link.rstrip("/").split("/")[-1])[:80] or link[-50:]
@@ -212,7 +249,7 @@ async def scrape_forum_rss(db, rss_url: str, source_name: str, client: httpx.Asy
                 "title": title,
                 "description": description,
                 "url": link,
-                "comments_count": 0 if comments == -1 else comments,
+                "comments_count": comments,  # Already corrected to 0 for unknown cases
                 "created_at": published
             }
 
@@ -239,36 +276,58 @@ async def scrape_forum_rss(db, rss_url: str, source_name: str, client: httpx.Asy
 async def scrape(db) -> Dict[str, object]:
     """Main entry point - scrape all configured forum sources."""
     if is_scraper_running(db, "forum_questions"):
-        return {"status": "already_running", "results": {}}
+        return {"status": "already_running", "results": {}, "total": 0, "new": 0}
 
     log_id = log_scrape_start(db, "forum_questions")
 
     results = {
         "squarespace_forum": 0,
         "total_questions": 0,
-        "new_questions": 0
+        "new_questions": 0,
+        "status": "running",
+        "errors": []
     }
 
     try:
         forum_rss_url = os.getenv("FORUM_RSS_URL", "")
         if not forum_rss_url:
-            results["error"] = "FORUM_RSS_URL not configured"
-            log_scrape_end(db, log_id, "failed", 0, "Missing FORUM_RSS_URL")
+            error_msg = "FORUM_RSS_URL not configured"
+            results["errors"].append(error_msg)
+            results["status"] = "failed"
+            log_scrape_end(db, log_id, "failed", 0, error_msg)
             return results
 
         async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
-            count, new_q = await scrape_forum_rss(db, forum_rss_url, "squarespace_forum", client)
-            results["squarespace_forum"] = count
-            results["total_questions"] += count
-            results["new_questions"] += new_q
+            try:
+                count, new_q = await scrape_forum_rss(db, forum_rss_url, "squarespace_forum", client)
+                results["squarespace_forum"] = count
+                results["total_questions"] += count
+                results["new_questions"] += new_q
+            except Exception as scrape_error:
+                error_msg = f"Forum scraping failed: {str(scrape_error)}"
+                results["errors"].append(error_msg)
+                print(error_msg)
 
         db.commit()
-        log_scrape_end(db, log_id, "success", results["total_questions"])
-        results["status"] = "success"
+
+        # Determine overall status
+        if results["total_questions"] > 0:
+            results["status"] = "success"
+            status_to_log = "success"
+        elif results["errors"]:
+            results["status"] = "failed"
+            status_to_log = "failed"
+        else:
+            results["status"] = "success"  # No questions found but no errors
+            status_to_log = "success"
+
+        error_summary = "; ".join(results["errors"]) if results["errors"] else None
+        log_scrape_end(db, log_id, status_to_log, results["total_questions"], error_summary)
 
     except Exception as e:
-        log_scrape_end(db, log_id, "failed", 0, str(e))
+        error_msg = str(e)
+        results["errors"].append(f"Fatal error: {error_msg}")
         results["status"] = "failed"
-        results["error"] = str(e)
+        log_scrape_end(db, log_id, "failed", 0, error_msg)
 
     return results

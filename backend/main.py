@@ -488,9 +488,20 @@ async def refresh_jobs_background(conn: sqlite3.Connection):
 
 async def refresh_forum_background(conn: sqlite3.Connection):
     """Background task to refresh forum questions."""
+    log_id = log_scrape_start(conn, "forum_questions")
+
     try:
-        await forum_questions.scrape(conn)
+        results = await forum_questions.scrape(conn)
+        total = results.get("total_questions", 0)
+        errors = results.get("errors", [])
+        error_summary = "; ".join(errors) if errors else None
+
+        # Use 'success' if we got any results or no errors, 'failed' otherwise
+        status = "success" if total > 0 or not errors else "failed"
+        log_scrape_end(conn, log_id, status, total, error_summary)
+
     except Exception as e:
+        log_scrape_end(conn, log_id, "failed", 0, str(e))
         print(f"Forum refresh failed: {e}")
 
 async def scheduled_refresh_forum():
@@ -563,7 +574,8 @@ async def get_forum_questions(
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
-    query = "SELECT * FROM forum_questions WHERE status = ? AND comments_count = 0"
+    # Get unanswered questions (comments_count = 0) or questions where we don't know the count
+    query = "SELECT * FROM forum_questions WHERE status = ? AND (comments_count = 0 OR comments_count IS NULL)"
     params = [status]
 
     if source:
