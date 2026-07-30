@@ -1,20 +1,23 @@
 """Forum question scraper.
 
-Monitors Stack Overflow for Squarespace CSS/JS questions and generates
+Monitors multiple sources for Squarespace CSS/JS questions and generates
 AI-powered answer suggestions using Qwen3 8B running locally in Docker.
 
 Callers: backend/main.py refresh_forum_background → scrape()
-APIs: Stack Exchange API, Qwen3 8B local model via llama-cpp-python
+APIs: Stack Exchange API, Squarespace forum RSS feeds, Qwen3 8B local model via llama-cpp-python
 Schema: forum_questions (source, source_id, title, ai_answer, status, ...)
 """
 import re
 import httpx
+import feedparser
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urljoin
 import html
 import os
 
 from db import log_scrape_start, log_scrape_end, is_scraper_running
+from notify import send_whatsapp
 
 USER_AGENT = "alexek-dashboard/1.0 (+https://hq.alexek.com)"
 
@@ -39,6 +42,37 @@ def clean_html(text: str) -> str:
     text = html.unescape(text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text
+
+def get_last_scrape_time(conn) -> Optional[datetime]:
+    """Get the last successful forum scrape time."""
+    try:
+        row = conn.execute(
+            """SELECT started_at FROM scrape_log
+               WHERE scraper = 'forum_questions' AND status = 'success'
+               ORDER BY started_at DESC LIMIT 1"""
+        ).fetchone()
+
+        if row and row["started_at"]:
+            # Parse ISO datetime
+            try:
+                return datetime.fromisoformat(row["started_at"].replace('Z', '+00:00'))
+            except ValueError:
+                return None
+        return None
+    except Exception as e:
+        print(f"Error getting last scrape time: {e}")
+        return None
+
+def get_time_filter(conn) -> datetime:
+    """Get the cutoff time for filtering questions based on last successful scrape."""
+    last_scrape = get_last_scrape_time(conn)
+
+    if last_scrape:
+        # Use last scrape time, but add some overlap to catch any missed questions
+        return last_scrape - timedelta(hours=2)  # 2 hour overlap
+    else:
+        # No previous scrape, use default time window
+        return datetime.utcnow() - timedelta(days=7)  # Default to 7 days
 
 def generate_ai_answer(question: Dict) -> Optional[str]:
     """Generate AI answer suggestion using local Qwen3 8B model."""
@@ -179,10 +213,119 @@ async def upsert_question(db, question_data: Dict) -> str:
         ))
         return "inserted"
 
-async def scrape_stackoverflow(db, client: httpx.AsyncClient) -> Tuple[int, int]:
-    """Scrape Stack Overflow for Squarespace CSS/JS questions. Returns (rows, new_questions)."""
+async def scrape_squarespace_rss(db, client: httpx.AsyncClient, cutoff_time: datetime) -> Tuple[int, int, List[Dict]]:
+    """Scrape Squarespace forum RSS feed. Returns (rows, new_questions, new_questions_for_alert)."""
     rows = 0
     new_questions = 0
+    new_questions_for_alert = []
+
+    # Squarespace forum RSS feed for code customization
+    rss_url = "https://forum.squarespace.com/forum/39-customize-with-code.xml"
+
+    try:
+        print(f"📡 Fetching Squarespace forum RSS: {rss_url}")
+        print(f"🕐 Filtering questions since: {cutoff_time.isoformat()}")
+
+        resp = await client.get(rss_url, timeout=30)
+        if resp.status_code != 200:
+            print(f"✗ Failed to fetch Squarespace RSS: HTTP {resp.status_code}")
+            return 0, 0, []
+
+        feed = feedparser.parse(resp.content)
+        if not feed.entries:
+            print("✗ No entries found in Squarespace RSS feed")
+            return 0, 0, []
+
+        print(f"✓ Found {len(feed.entries)} entries in Squarespace RSS feed")
+
+        for entry in feed.entries:
+            title = clean_html(entry.get("title", ""))
+            description = clean_html(entry.get("summary") or entry.get("description", ""))
+            link = entry.get("link", "")
+            published = entry.get("published") or entry.get("updated") or datetime.utcnow().isoformat()
+
+            # Parse the published date
+            try:
+                if isinstance(published, str):
+                    # Try parsing ISO format
+                    try:
+                        published_dt = datetime.fromisoformat(published.replace('Z', '+00:00'))
+                    except ValueError:
+                        # Try parsing feedparser format
+                        published_dt = datetime.strptime(published, '%a, %d %b %Y %H:%M:%S %z')
+                else:
+                    published_dt = published
+            except Exception as e:
+                print(f"Error parsing date {published}: {e}")
+                continue
+
+            # Check if this is newer than our cutoff time
+            if published_dt < cutoff_time:
+                continue
+
+            if not title or not link:
+                continue
+
+            # Filter for CSS/JS/design questions only
+            if not is_forum_question(title, description):
+                continue
+
+            # Generate source_id from URL
+            source_id = re.sub(r"[^\w-]", "", link.rstrip("/").split("/")[-1])[:80] or link[-50:]
+
+            # Check if already exists
+            existing = db.execute(
+                "SELECT id FROM forum_questions WHERE source = ? AND source_id = ?",
+                ("squarespace_forum", source_id)
+            ).fetchone()
+
+            if existing:
+                rows += 1
+                continue
+
+            # Build question data
+            question_data = {
+                "source": "squarespace_forum",
+                "source_id": source_id,
+                "title": title,
+                "description": description[:1000],  # Limit description length
+                "url": link,
+                "comments_count": 0,  # Don't track comment counts for RSS
+                "created_at": published_dt.isoformat() if published_dt else datetime.utcnow().isoformat()
+            }
+
+            # Generate AI answer
+            print(f"Generating AI answer for: {title[:50]}...")
+            ai_answer = generate_ai_answer(question_data)
+            if ai_answer:
+                question_data["ai_answer"] = ai_answer
+                question_data["answer_generated_at"] = datetime.utcnow().isoformat()
+                print(f"✓ AI answer generated for: {title[:30]}")
+            else:
+                print(f"✗ No AI answer generated for: {title[:30]}")
+
+            status = await upsert_question(db, question_data)
+            if status == "inserted":
+                new_questions += 1
+                new_questions_for_alert.append({
+                    "title": title,
+                    "url": link,
+                    "description": description[:200],
+                    "ai_answer": ai_answer,
+                    "source": "squarespace_forum"
+                })
+            rows += 1
+
+    except Exception as e:
+        print(f"✗ Error scraping Squarespace RSS: {e}")
+
+    return rows, new_questions, new_questions_for_alert
+
+async def scrape_stackoverflow(db, client: httpx.AsyncClient, cutoff_time: datetime) -> Tuple[int, int, List[Dict]]:
+    """Scrape Stack Overflow for Squarespace CSS/JS questions. Returns (rows, new_questions, new_questions_for_alert)."""
+    rows = 0
+    new_questions = 0
+    new_questions_for_alert = []
 
     # Search terms for Squarespace CSS/JS questions
     search_tags = ['squarespace', 'css', 'javascript']
@@ -200,7 +343,7 @@ async def scrape_stackoverflow(db, client: httpx.AsyncClient) -> Tuple[int, int]
                 'site': 'stackoverflow',
                 'filter': 'withbody',  # Include question body
                 'pagesize': 50,
-                'fromdate': int((datetime.utcnow() - timedelta(days=7)).timestamp())  # Last 7 days
+                'fromdate': int(cutoff_time.timestamp())  # Since cutoff time
             }
 
             try:
@@ -269,6 +412,13 @@ async def scrape_stackoverflow(db, client: httpx.AsyncClient) -> Tuple[int, int]
                     status = await upsert_question(db, question_data)
                     if status == "inserted":
                         new_questions += 1
+                        new_questions_for_alert.append({
+                            "title": title,
+                            "url": f"https://stackoverflow.com/questions/{question_id}",
+                            "description": description[:200],
+                            "ai_answer": ai_answer,
+                            "source": "stackoverflow"
+                        })
                     rows += 1
 
             except Exception as e:
@@ -278,7 +428,62 @@ async def scrape_stackoverflow(db, client: httpx.AsyncClient) -> Tuple[int, int]
     except Exception as e:
         print(f"Error in Stack Overflow scraping: {e}")
 
-    return rows, new_questions
+    return rows, new_questions, new_questions_for_alert
+
+def format_forum_alert(question: Dict) -> str:
+    """Format a forum question for WhatsApp alert."""
+    title = question.get("title") or "New forum question"
+    source = question.get("source", "unknown")
+    url = question.get("url") or ""
+    ai_answer = question.get("ai_answer")
+
+    lines = [f"📱 {source.title()}: {title}"]
+    if ai_answer:
+        lines.append(f"💡 AI: {ai_answer[:100]}...")
+    if url:
+        lines.append(f"🔗 {url}")
+
+    return "\n".join(lines)
+
+def format_forum_digest(questions: List[Dict]) -> str:
+    """Format multiple forum questions for WhatsApp digest."""
+    if not questions:
+        return ""
+
+    lines = [f"📱 {len(questions)} new Squarespace forum question(s):"]
+    for i, question in enumerate(questions, 1):
+        title = (question.get("title") or "Untitled")[:80]
+        source = question.get("source", "unknown")
+        url = question.get("url") or ""
+        lines.append(f"{i}. [{source}] {title}")
+        if url:
+            lines.append(f"   {url}")
+
+    return "\n".join(lines)
+
+async def notify_new_forum_questions(questions: List[Dict]) -> Optional[str]:
+    """Send WhatsApp alerts for new forum questions."""
+    if not questions:
+        return None
+
+    # Check if forum alerts are enabled
+    if not os.getenv("FORUM_ALERTS_ENABLED", "1") == "1":
+        return "Forum alerts disabled"
+
+    try:
+        # Check if digest mode is enabled
+        if os.getenv("FORUM_ALERT_DIGEST", "1") == "1":
+            # Send digest
+            text = format_forum_digest(questions)
+        else:
+            # Send individual alerts
+            texts = [format_forum_alert(q) for q in questions]
+            text = "\n\n---\n\n".join(texts)
+
+        error = await send_whatsapp(text)
+        return error
+    except Exception as e:
+        return str(e)
 
 async def scrape(db) -> Dict[str, object]:
     """Main entry point - scrape all configured forum sources."""
@@ -287,7 +492,12 @@ async def scrape(db) -> Dict[str, object]:
 
     log_id = log_scrape_start(db, "forum_questions")
 
+    # Get time filter based on last successful scrape
+    cutoff_time = get_time_filter(db)
+    print(f"🕐 Using time filter: since {cutoff_time.isoformat()}")
+
     results = {
+        "squarespace_forum": 0,
         "stackoverflow": 0,
         "total_questions": 0,
         "new_questions": 0,
@@ -295,19 +505,49 @@ async def scrape(db) -> Dict[str, object]:
         "errors": []
     }
 
+    all_new_questions = []  # Collect all new questions for alerts
+
     try:
         async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
+            # Scrape Squarespace forum RSS
             try:
-                count, new_q = await scrape_stackoverflow(db, client)
+                count, new_q, new_for_alert = await scrape_squarespace_rss(db, client, cutoff_time)
+                results["squarespace_forum"] = count
+                results["total_questions"] += count
+                results["new_questions"] += new_q
+                all_new_questions.extend(new_for_alert)
+            except Exception as scrape_error:
+                error_msg = f"Squarespace forum scraping failed: {str(scrape_error)}"
+                results["errors"].append(error_msg)
+                print(error_msg)
+
+            # Scrape Stack Overflow
+            try:
+                count, new_q, new_for_alert = await scrape_stackoverflow(db, client, cutoff_time)
                 results["stackoverflow"] = count
                 results["total_questions"] += count
                 results["new_questions"] += new_q
+                all_new_questions.extend(new_for_alert)
             except Exception as scrape_error:
                 error_msg = f"Stack Overflow scraping failed: {str(scrape_error)}"
                 results["errors"].append(error_msg)
                 print(error_msg)
 
         db.commit()
+
+        # Send WhatsApp alerts for new forum questions
+        if all_new_questions:
+            try:
+                alert_error = await notify_new_forum_questions(all_new_questions)
+                if alert_error:
+                    results["errors"].append(f"Alert failed: {alert_error}")
+                    print(f"WhatsApp alert error: {alert_error}")
+                else:
+                    print(f"✓ Sent WhatsApp alerts for {len(all_new_questions)} new forum questions")
+            except Exception as alert_error:
+                error_msg = f"Forum alert error: {str(alert_error)}"
+                results["errors"].append(error_msg)
+                print(error_msg)
 
         # Clean up old forum questions
         try:
@@ -339,8 +579,6 @@ async def scrape(db) -> Dict[str, object]:
 
 def purge_forum_questions(conn) -> None:
     """Clean up old forum questions based on retention rules."""
-    from datetime import timedelta
-
     # Get retention settings from environment variables
     new_days = int(os.getenv("FORUM_RETENTION_NEW_DAYS", "30"))      # Keep 'new' questions for 30 days
     answered_days = int(os.getenv("FORUM_RETENTION_ANSWERED_DAYS", "90"))  # Keep 'answered' for 90 days
