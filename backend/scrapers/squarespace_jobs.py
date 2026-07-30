@@ -444,10 +444,10 @@ def upwork_configured() -> bool:
     )
 
 
-async def scrape_upwork_graphql(db) -> int:
-    """Scrape Upwork via GraphQL when OAuth credentials are configured."""
+async def scrape_upwork_graphql(db):
+    """Scrape Upwork via GraphQL when OAuth credentials are configured. Returns (rows, new_jobs)."""
     if not upwork_configured():
-        return 0
+        return 0, []
 
     client_id = os.environ["UPWORK_CLIENT_ID"]
     client_secret = os.environ["UPWORK_CLIENT_SECRET"]
