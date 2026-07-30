@@ -81,6 +81,9 @@ def generate_ai_answer(question: Dict) -> Optional[str]:
         if response and 'choices' in response and len(response['choices']) > 0:
             return response['choices'][0]['text'].strip()
 
+    except ImportError:
+        print("llama-cpp-python not installed - AI answers disabled")
+        return None
     except Exception as e:
         print(f"Local AI generation failed: {e}")
 
