@@ -14,10 +14,20 @@ from typing import Dict, List, Optional, Tuple
 import html
 
 from db import purge_stale_data
-from notify import notify_new_high_score_jobs
+from notify import alert_min_score, notify_new_high_score_jobs
 
 USER_AGENT = "alexek-dashboard/1.0 (+https://hq.alexek.com)"
 DESCRIPTION_SNIPPET_LEN = 400
+
+
+def meets_min_score(priority_score) -> bool:
+    """Only persist/alert jobs at or above ALERT_MIN_SCORE (default 50)."""
+    if priority_score is None:
+        return False
+    try:
+        return float(priority_score) >= alert_min_score()
+    except (TypeError, ValueError):
+        return False
 
 # Phrase matches recorded as enrichment; bare "squarespace" is enough to include a job.
 SQUARESPACE_KEYWORDS = [
@@ -404,6 +414,9 @@ async def scrape_freelancer_rss(db):
         else:
             source_id = re.sub(r"[^\w-]", "", link.rstrip("/").split("/")[-1])[:80] or link[-50:]
 
+        if not meets_min_score(priority):
+            continue
+
         action = upsert_job(
             db,
             source="freelancer",
@@ -535,6 +548,9 @@ async def scrape_upwork_graphql(db):
         mid_usd = int(budget_info["budget_mid_usd"]) if budget_info else None
         priority = compute_priority(mid_usd, effort)
         job_type = "short-term" if is_short_term_job(title, description) or effort <= 3 else "unknown"
+
+        if not meets_min_score(priority):
+            continue
 
         action = upsert_job(
             db,

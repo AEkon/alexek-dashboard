@@ -1,7 +1,7 @@
 """WhatsApp alerts via CallMeBot.
 
 Callers: scrapers/squarespace_jobs.scrape() after new inserts.
-Env: WHATSAPP_PHONE, WHATSAPP_APIKEY, ALERT_MIN_SCORE (default 50), ALERT_MAX_PER_SCRAPE (default 5).
+Env: WHATSAPP_PHONE, WHATSAPP_APIKEY, ALERT_MIN_SCORE (default 50; also gates DB inserts), ALERT_MAX_PER_SCRAPE (default 5).
 No data files. User: "CallMeBot api key: 3556567" — key must live in Railway env only.
 """
 from __future__ import annotations

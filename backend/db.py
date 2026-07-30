@@ -177,6 +177,17 @@ def purge_stale_data(conn: sqlite3.Connection) -> None:
         "DELETE FROM jobs WHERE status = 'new' AND posted_date < ?",
         (cutoff_new,),
     )
+    # Drop low-score inbox rows (same bar as scrape insert / WhatsApp alerts)
+    try:
+        min_score = float(os.getenv("ALERT_MIN_SCORE", "50"))
+    except ValueError:
+        min_score = 50.0
+    conn.execute(
+        """DELETE FROM jobs
+           WHERE status = 'new'
+             AND (priority_score IS NULL OR priority_score < ?)""",
+        (min_score,),
+    )
     conn.execute(
         """DELETE FROM jobs
            WHERE status IN ('skipped', 'archived')
