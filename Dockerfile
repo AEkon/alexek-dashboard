@@ -37,8 +37,8 @@ RUN cd frontend && npm install
 COPY frontend/ ./frontend/
 RUN cd frontend && npm run build
 
-# Copy frontend static files to static directory for serving
-RUN cp -r frontend/dist/* static/
+# Create static directory and copy frontend files
+RUN mkdir -p static && cp -r frontend/dist/* static/
 
 # Create directory for database
 RUN mkdir -p /app/data
