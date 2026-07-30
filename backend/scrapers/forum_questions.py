@@ -44,71 +44,89 @@ def clean_html(text: str) -> str:
 
 def generate_ai_answer(question: Dict) -> Optional[str]:
     """Generate AI answer suggestion using local Qwen3 8B model."""
+    print(f"🤖 Attempting AI answer generation for: {question.get('title', '')[:50]}...")
+
     try:
         from llama_cpp import Llama
+        print("✓ llama-cpp-python imported successfully")
+    except ImportError as ie:
+        print(f"✗ llama-cpp-python not installed: {ie}")
+        print("  Install with: pip install llama-cpp-python")
+        return None
+    except Exception as e:
+        print(f"✗ Import error: {e}")
+        return None
 
-        model_path = os.getenv("QWEN_MODEL_PATH", "/app/models/qwen3-8b.gguf")
-        if not os.path.exists(model_path):
-            print(f"Model not found at {model_path}")
-            return None
+    model_path = os.getenv("QWEN_MODEL_PATH", "/app/models/qwen3-8b.gguf")
+    print(f"📂 Model path: {model_path}")
 
-        title = question.get("title", "")
-        description = question.get("description", "")
-        url = question.get("url", "")
+    if not os.path.exists(model_path):
+        print(f"✗ Model file not found at: {model_path}")
+        print("  Solutions:")
+        print("  1. Download Qwen3 8B GGUF model to that path")
+        print("  2. Set QWEN_MODEL_PATH environment variable to correct location")
+        print("  3. Place model file at /app/models/qwen3-8b.gguf")
+        return None
 
-        # Create a simple prompt based on the question content
-        question_text = f"{title}. {description[:200]}".strip() if description else title
-        prompt = f"""As a Squarespace expert, provide a brief, helpful answer to this forum question: "{question_text}"
+    title = question.get("title", "")
+    description = question.get("description", "")
+
+    # Create a simple prompt based on the question content
+    question_text = f"{title}. {description[:200]}".strip() if description else title
+    prompt = f"""As a Squarespace expert, provide a brief, helpful answer to this forum question: "{question_text}"
 
 If the question is about CSS/JS code, provide a simple solution. If it's about design/configuration, give clear guidance.
 Keep your answer under 2 sentences and be practical."""
 
-        # Initialize model (lazy load - only for first call)
-        if not hasattr(generate_ai_answer, '_model'):
-            try:
-                generate_ai_answer._model = Llama(
-                    model_path=model_path,
-                    n_ctx=512,
-                    n_threads=2,
-                    verbose=False
-                )
-                print("Local AI model loaded successfully")
-            except Exception as model_error:
-                print(f"Failed to load AI model: {model_error}")
-                return None
-
-        model = generate_ai_answer._model
-
-        # Generate response with proper error handling
+    # Initialize model (lazy load - only for first call)
+    if not hasattr(generate_ai_answer, '_model'):
         try:
-            response = model(
-                prompt,
-                max_tokens=150,
-                temperature=0.6,
-                stop=["\n\n\n", "###", "User:", "Question:"],
-                echo=False
+            print("🔄 Loading AI model (first time)...")
+            generate_ai_answer._model = Llama(
+                model_path=model_path,
+                n_ctx=512,
+                n_threads=2,
+                verbose=False
             )
-
-            if response and hasattr(response, 'choices') and len(response['choices']) > 0:
-                answer = response['choices'][0]['text'].strip()
-                if answer and len(answer) > 10:  # Ensure meaningful answer
-                    return answer
-                else:
-                    print("Generated answer too short or empty")
-                    return None
-            else:
-                print("Unexpected response format from model")
-                return None
-
-        except Exception as generation_error:
-            print(f"Model generation failed: {generation_error}")
+            print("✓ Local AI model loaded successfully")
+        except Exception as model_error:
+            print(f"✗ Failed to load AI model: {model_error}")
+            print("  This could be due to:")
+            print("  - Incompatible model format")
+            print("  - insufficient memory")
+            print("  - CPU architecture mismatch")
             return None
 
-    except ImportError:
-        print("llama-cpp-python not installed - AI answers disabled")
-        return None
-    except Exception as e:
-        print(f"Local AI generation failed: {e}")
+    model = generate_ai_answer._model
+
+    # Generate response with proper error handling
+    try:
+        print("🧠 Generating AI response...")
+        response = model(
+            prompt,
+            max_tokens=150,
+            temperature=0.6,
+            stop=["\n\n\n", "###", "User:", "Question:"],
+            echo=False
+        )
+
+        if response and hasattr(response, 'choices') and len(response['choices']) > 0:
+            answer = response['choices'][0]['text'].strip()
+            if answer and len(answer) > 10:  # Ensure meaningful answer
+                print(f"✓ AI answer generated: {answer[:50]}...")
+                return answer
+            else:
+                print("✗ Generated answer too short or empty")
+                return None
+        else:
+            print("✗ Unexpected response format from model")
+            print(f"  Response type: {type(response)}")
+            print(f"  Response attributes: {dir(response) if response else 'None'}")
+            return None
+
+    except Exception as generation_error:
+        print(f"✗ Model generation failed: {generation_error}")
+        print(f"  Error type: {type(generation_error).__name__}")
         return None
 
 async def upsert_question(db, question_data: Dict) -> str:
@@ -183,30 +201,13 @@ async def scrape_forum_rss(db, rss_url: str, source_name: str, client: httpx.Asy
             link = entry.get("link", "")
             comments = 0
 
-            # Try to get comment count from various RSS fields
+            # Squarespace RSS doesn't provide comment counts, so we include all questions
+            # Users will manually triage which ones are answered vs unanswered
             comments = 0
-            comments_unknown = False
-
-            if hasattr(entry, 'slash_comments'):
-                try:
-                    comments = int(entry.slash_comments) if entry.slash_comments else 0
-                except (ValueError, TypeError):
-                    comments_unknown = True
-            elif hasattr(entry, 'wfw_commentrss'):
-                # Has comment RSS but no count - mark as unknown
-                comments_unknown = True
-            elif 'comment_count' in entry:
-                try:
-                    comments = int(entry.comment_count) if entry.comment_count else 0
-                except (ValueError, TypeError):
-                    comments_unknown = True
-            else:
-                # No comment information available - assume 0 to avoid missing questions
-                comments_unknown = True
 
             # Log first entry to debug RSS structure
             if rows == 0:
-                print(f"RSS Entry debug: title={title[:30]}, link={link[:50]}, comments={comments}, unknown={comments_unknown}")
+                print(f"RSS Entry debug: title={title[:30]}, link={link[:50]}")
                 print(f"Available fields: {list(entry.keys())}")
 
             published = entry.get("published") or entry.get("updated") or datetime.utcnow().isoformat()
@@ -217,17 +218,6 @@ async def scrape_forum_rss(db, rss_url: str, source_name: str, client: httpx.Asy
             # Filter for CSS/JS/design questions only
             if not is_forum_question(title, description):
                 continue
-
-            # Only skip if we're certain there are comments (> 0)
-            # Include all posts where we don't know the count or it's 0
-            if not comments_unknown and comments > 0:
-                continue
-
-            # For unknown comment counts, assume 0 and let the user verify
-            if comments_unknown:
-                comments = 0
-                if rows == 0:  # Only log once
-                    print(f"Unknown comment count for: {title[:40]} - assuming 0, will be verified by user")
 
             # Generate source_id from URL
             source_id = re.sub(r"[^\w-]", "", link.rstrip("/").split("/")[-1])[:80] or link[-50:]

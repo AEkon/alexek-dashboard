@@ -574,8 +574,8 @@ async def get_forum_questions(
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
-    # Get unanswered questions (comments_count = 0) or questions where we don't know the count
-    query = "SELECT * FROM forum_questions WHERE status = ? AND (comments_count = 0 OR comments_count IS NULL)"
+    # Get all unsolved questions (Squarespace RSS doesn't provide comment counts)
+    query = "SELECT * FROM forum_questions WHERE status = ?"
     params = [status]
 
     if source:
