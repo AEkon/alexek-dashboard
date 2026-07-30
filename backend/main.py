@@ -563,7 +563,7 @@ async def get_forum_questions(
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
-    query = "SELECT * FROM forum_questions WHERE status = ?"
+    query = "SELECT * FROM forum_questions WHERE status = ? AND comments_count = 0"
     params = [status]
 
     if source:

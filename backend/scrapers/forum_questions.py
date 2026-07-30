@@ -203,10 +203,14 @@ async def scrape_forum_rss(db, rss_url: str, source_name: str, client: httpx.Asy
             }
 
             # Generate AI answer (synchronous local inference)
+            print(f"Generating AI answer for: {title[:50]}...")
             ai_answer = generate_ai_answer(question_data)
             if ai_answer:
                 question_data["ai_answer"] = ai_answer
                 question_data["answer_generated_at"] = datetime.utcnow().isoformat()
+                print(f"✓ AI answer generated for: {title[:30]}")
+            else:
+                print(f"✗ No AI answer generated for: {title[:30]}")
 
             status = await upsert_question(db, question_data)
             if status == "inserted":

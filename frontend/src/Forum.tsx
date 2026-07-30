@@ -148,8 +148,13 @@ export default function Forum() {
 
   return (
     <div className="forum-section">
+      <div className="section-divider">
+        <h3 className="section-title">Forum Monitor</h3>
+        <p className="section-description">Unanswered Squarespace CSS/JS questions with AI answer suggestions</p>
+      </div>
+
       <header className="section-header">
-        <h2>Forum Monitor</h2>
+        <h2>Forum Questions</h2>
         <button
           className="refresh-button"
           onClick={handleRefresh}
@@ -211,6 +216,7 @@ export default function Forum() {
                 <th onClick={() => {/* TODO: Add sorting */}} className="sortable">
                   Title {'▲'}
                 </th>
+                <th>AI Answer</th>
                 <th>Source</th>
                 <th>Comments</th>
                 <th>Time</th>
@@ -236,6 +242,13 @@ export default function Forum() {
                           </div>
                         )}
                       </div>
+                    )}
+                  </td>
+                  <td>
+                    {question.ai_answer ? (
+                      <span className="ai-badge">✓ AI</span>
+                    ) : (
+                      <span className="no-ai-badge">—</span>
                     )}
                   </td>
                   <td>

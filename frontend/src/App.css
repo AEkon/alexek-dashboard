@@ -1028,4 +1028,40 @@ a.apply-drawer-open {
   margin: 0;
   line-height: 1.5;
 }
+
+.ai-badge {
+  background: var(--color-accent);
+  color: white;
+  padding: 0.2rem 0.5rem;
+  border-radius: 3px;
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+.no-ai-badge {
+  color: #999;
+  font-size: 0.8rem;
+}
+
+/* Forum Section Divider */
+.section-divider {
+  background: linear-gradient(135deg, var(--color-accent) 0%, var(--color-primary) 100%);
+  color: white;
+  padding: 1.5rem;
+  border-radius: 4px;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.section-title {
+  margin: 0 0 0.5rem 0;
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+
+.section-description {
+  margin: 0;
+  opacity: 0.9;
+  font-size: 0.95rem;
+}
 }
