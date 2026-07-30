@@ -115,7 +115,7 @@ async def startup():
 
             # Add forum refresh scheduler
             forum_interval = int(os.getenv("FORUM_SCRAPE_INTERVAL_MINUTES", "30"))
-            if forum_interval > 0 and os.getenv("FORUM_RSS_URL"):
+            if forum_interval > 0:
                 scheduler.add_job(
                     scheduled_refresh_forum,
                     "interval",

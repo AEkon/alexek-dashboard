@@ -4,19 +4,19 @@ Monitors Squarespace forums for unanswered CSS/JS questions and generates
 AI-powered answer suggestions using Qwen3 8B running locally in Docker.
 
 Callers: backend/main.py refresh_forum_background → scrape()
-APIs: Forum RSS feeds, Qwen3 8B local model via llama-cpp-python
+APIs: Squarespace forum web scraping, Qwen3 8B local model via llama-cpp-python
 Schema: forum_questions (source, source_id, title, ai_answer, status, ...)
 """
-import feedparser
-import httpx
-import os
 import re
+import httpx
+from bs4 import BeautifulSoup
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import quote_plus
+from urllib.parse import urljoin
 import html
+import os
 
-from db import log_scrape_start, log_scrape_end, is_scraper_running
+from db import log_scrape_start, log_scrape_end, is_scraper_running, purge_stale_data
 
 USER_AGENT = "alexek-dashboard/1.0 (+https://hq.alexek.com)"
 
@@ -181,85 +181,118 @@ async def upsert_question(db, question_data: Dict) -> str:
         ))
         return "inserted"
 
-async def scrape_forum_rss(db, rss_url: str, source_name: str, client: httpx.AsyncClient) -> Tuple[int, int]:
-    """Scrape a single forum RSS feed. Returns (rows, new_questions)."""
+async def scrape_squarespace_forum(db, client: httpx.AsyncClient) -> Tuple[int, int]:
+    """Scrape Squarespace forum for unanswered CSS/JS questions. Returns (rows, new_questions)."""
     rows = 0
     new_questions = 0
 
+    # Squarespace forum URLs - focusing on recent discussions across all categories
+    forum_urls = [
+        "https://forum.squarespace.com/categories/custom-css.14/",
+        "https://forum.squarespace.com/categories/javascript.15/",
+        "https://forum.squarespace.com/categories/design-styles.16/",
+        "https://forum.squarespace.com/categories/developer-platform.17/"
+    ]
+
     try:
-        resp = await client.get(rss_url)
-        if resp.status_code != 200:
-            return 0, 0
+        for forum_url in forum_urls:
+            print(f"Scraping forum: {forum_url}")
 
-        feed = feedparser.parse(resp.content)
-        if not feed.entries:
-            return 0, 0
+            try:
+                resp = await client.get(forum_url, timeout=30)
+                if resp.status_code != 200:
+                    print(f"Failed to fetch {forum_url}: HTTP {resp.status_code}")
+                    continue
 
-        for entry in feed.entries[:50]:
-            title = clean_html(entry.get("title", ""))
-            description = clean_html(entry.get("summary") or entry.get("description", ""))
-            link = entry.get("link", "")
-            comments = 0
+                soup = BeautifulSoup(resp.content, 'html.parser')
 
-            # Squarespace RSS doesn't provide comment counts, so we include all questions
-            # Users will manually triage which ones are answered vs unanswered
-            comments = 0
+                # Find recent discussion threads - adjust selectors based on actual HTML structure
+                # These selectors may need to be adjusted based on the actual forum structure
+                discussion_links = soup.find_all('a', href=re.compile(r'/discussion/\d+/'))
 
-            # Log first entry to debug RSS structure
-            if rows == 0:
-                print(f"RSS Entry debug: title={title[:30]}, link={link[:50]}")
-                print(f"Available fields: {list(entry.keys())}")
+                print(f"Found {len(discussion_links)} discussion threads")
 
-            published = entry.get("published") or entry.get("updated") or datetime.utcnow().isoformat()
+                for link in discussion_links[:25]:  # Limit to 25 per category
+                    href = link.get('href', '')
+                    if not href:
+                        continue
 
-            if not title or not link:
+                    # Build full URL
+                    full_url = urljoin(forum_url, href)
+
+                    # Generate source_id from URL
+                    source_id = re.sub(r"[^\w-]", "", href.rstrip("/").split("/")[-1])[:80]
+
+                    # Check if already exists
+                    existing = db.execute(
+                        "SELECT id FROM forum_questions WHERE source = ? AND source_id = ?",
+                        ("squarespace_forum", source_id)
+                    ).fetchone()
+
+                    if existing:
+                        rows += 1
+                        continue
+
+                    # Get the discussion page to extract full details
+                    try:
+                        discussion_resp = await client.get(full_url, timeout=20)
+                        if discussion_resp.status_code != 200:
+                            continue
+
+                        discussion_soup = BeautifulSoup(discussion_resp.content, 'html.parser')
+
+                        # Extract title
+                        title_elem = discussion_soup.find('h1') or discussion_soup.find('title')
+                        title = clean_html(title_elem.get_text()) if title_elem else "Unknown Title"
+
+                        # Extract description/content
+                        content_elem = discussion_soup.find('div', class_='discussion-content') or \
+                                     discussion_soup.find('div', class_='post-content')
+
+                        description = ""
+                        if content_elem:
+                            description = clean_html(content_elem.get_text())
+
+                        # Check if this is CSS/JS/design related
+                        if not is_forum_question(title, description):
+                            continue
+
+                        # Build question data
+                        question_data = {
+                            "source": "squarespace_forum",
+                            "source_id": source_id,
+                            "title": title,
+                            "description": description[:1000],  # Limit description length
+                            "url": full_url,
+                            "comments_count": 0,  # Will be determined by user triage
+                            "created_at": datetime.utcnow().isoformat()
+                        }
+
+                        # Generate AI answer
+                        print(f"Generating AI answer for: {title[:50]}...")
+                        ai_answer = generate_ai_answer(question_data)
+                        if ai_answer:
+                            question_data["ai_answer"] = ai_answer
+                            question_data["answer_generated_at"] = datetime.utcnow().isoformat()
+                            print(f"✓ AI answer generated for: {title[:30]}")
+                        else:
+                            print(f"✗ No AI answer generated for: {title[:30]}")
+
+                        status = await upsert_question(db, question_data)
+                        if status == "inserted":
+                            new_questions += 1
+                        rows += 1
+
+                    except Exception as e:
+                        print(f"Error fetching discussion {full_url}: {e}")
+                        continue
+
+            except Exception as e:
+                print(f"Error scraping forum {forum_url}: {e}")
                 continue
-
-            # Filter for CSS/JS/design questions only
-            if not is_forum_question(title, description):
-                continue
-
-            # Generate source_id from URL
-            source_id = re.sub(r"[^\w-]", "", link.rstrip("/").split("/")[-1])[:80] or link[-50:]
-
-            # Check if already exists
-            existing = db.execute(
-                "SELECT id FROM forum_questions WHERE source = ? AND source_id = ?",
-                (source_name, source_id)
-            ).fetchone()
-
-            if existing:
-                rows += 1
-                continue
-
-            # Build question data
-            question_data = {
-                "source": source_name,
-                "source_id": source_id,
-                "title": title,
-                "description": description,
-                "url": link,
-                "comments_count": comments,  # Already corrected to 0 for unknown cases
-                "created_at": published
-            }
-
-            # Generate AI answer (synchronous local inference)
-            print(f"Generating AI answer for: {title[:50]}...")
-            ai_answer = generate_ai_answer(question_data)
-            if ai_answer:
-                question_data["ai_answer"] = ai_answer
-                question_data["answer_generated_at"] = datetime.utcnow().isoformat()
-                print(f"✓ AI answer generated for: {title[:30]}")
-            else:
-                print(f"✗ No AI answer generated for: {title[:30]}")
-
-            status = await upsert_question(db, question_data)
-            if status == "inserted":
-                new_questions += 1
-            rows += 1
 
     except Exception as e:
-        print(f"Error scraping {source_name}: {e}")
+        print(f"Error in forum scraping: {e}")
 
     return rows, new_questions
 
@@ -279,17 +312,9 @@ async def scrape(db) -> Dict[str, object]:
     }
 
     try:
-        forum_rss_url = os.getenv("FORUM_RSS_URL", "")
-        if not forum_rss_url:
-            error_msg = "FORUM_RSS_URL not configured"
-            results["errors"].append(error_msg)
-            results["status"] = "failed"
-            log_scrape_end(db, log_id, "failed", 0, error_msg)
-            return results
-
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
             try:
-                count, new_q = await scrape_forum_rss(db, forum_rss_url, "squarespace_forum", client)
+                count, new_q = await scrape_squarespace_forum(db, client)
                 results["squarespace_forum"] = count
                 results["total_questions"] += count
                 results["new_questions"] += new_q
@@ -299,6 +324,12 @@ async def scrape(db) -> Dict[str, object]:
                 print(error_msg)
 
         db.commit()
+
+        # Clean up old forum questions (similar to jobs system)
+        try:
+            purge_forum_questions(db)
+        except Exception as cleanup_error:
+            print(f"Cleanup error: {cleanup_error}")
 
         # Determine overall status
         if results["total_questions"] > 0:
@@ -321,3 +352,37 @@ async def scrape(db) -> Dict[str, object]:
         log_scrape_end(db, log_id, "failed", 0, error_msg)
 
     return results
+
+def purge_forum_questions(conn) -> None:
+    """Clean up old forum questions based on retention rules."""
+    from datetime import timedelta
+
+    # Get retention settings from environment variables
+    new_days = int(os.getenv("FORUM_RETENTION_NEW_DAYS", "30"))      # Keep 'new' questions for 30 days
+    answered_days = int(os.getenv("FORUM_RETENTION_ANSWERED_DAYS", "90"))  # Keep 'answered' for 90 days
+    archived_days = int(os.getenv("FORUM_RETENTION_ARCHIVED_DAYS", "7"))   # Keep 'archived' for 7 days
+
+    cutoff_new = (datetime.utcnow() - timedelta(days=new_days)).isoformat()
+    cutoff_answered = (datetime.utcnow() - timedelta(days=answered_days)).isoformat()
+    cutoff_archived = (datetime.utcnow() - timedelta(days=archived_days)).isoformat()
+
+    # Delete old new questions
+    conn.execute(
+        "DELETE FROM forum_questions WHERE status = 'new' AND created_at < ?",
+        (cutoff_new,),
+    )
+
+    # Delete old answered questions
+    conn.execute(
+        "DELETE FROM forum_questions WHERE status = 'answered' AND COALESCE(answered_at, created_at) < ?",
+        (cutoff_answered,),
+    )
+
+    # Delete old archived questions
+    conn.execute(
+        "DELETE FROM forum_questions WHERE status = 'archived' AND COALESCE(updated_at, created_at) < ?",
+        (cutoff_archived,),
+    )
+
+    conn.commit()
+    print(f"Forum cleanup completed: new<{new_days}d, answered<{answered_days}d, archived<{archived_days}d")
