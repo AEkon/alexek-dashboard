@@ -11,6 +11,7 @@ import os
 import re
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import quote_plus
 import html
 
 from db import purge_stale_data
@@ -56,7 +57,34 @@ SHORT_TERM_INDICATORS = [
     "fixed price",
 ]
 
-FREELANCER_RSS_URL = "https://www.freelancer.com/rss.xml?keyword=squarespace"
+# Multiple keyword feeds catch more Squarespace gigs than a single RSS query.
+FREELANCER_FEED_KEYWORDS = [
+    "squarespace",
+    "squarespace css",
+    "squarespace designer",
+    "squarespace redesign",
+    "squarespace fix",
+    "squarespace expert",
+]
+
+# Soft optional: PeoplePerHour public search RSS (often empty; never fails the scrape).
+PPH_RSS_URL = "https://www.peopleperhour.com/freelance-jobs.rss?q=squarespace"
+
+
+def freelancer_rss_url(keyword: str) -> str:
+    return f"https://www.freelancer.com/rss.xml?keyword={quote_plus(keyword)}"
+
+
+def detect_job_kind(title: str, description: str, keyword_matches: str = "") -> str:
+    """Classify listing for proposal templates + outcome bias: fix|css|redesign|general."""
+    text = f"{title} {description} {keyword_matches}".lower()
+    if any(p in text for p in ("redesign", "rebrand", "from scratch", "full website", "full site", "migration", "migrate")):
+        return "redesign"
+    if any(p in text for p in ("custom css", "css fix", "css", "styling", "style")):
+        return "css"
+    if any(p in text for p in ("quick fix", "bug fix", "small fix", "fix", "tweak", "urgent", "broken")):
+        return "fix"
+    return "general"
 
 
 def is_squarespace_job(title: str, description: str) -> bool:
@@ -239,11 +267,54 @@ def estimate_effort(title: str, description: str) -> int:
     return max(1, min(10, score))
 
 
-def compute_priority(budget_mid_usd: Optional[int], effort: int) -> Optional[float]:
-    """Value per unit effort. Higher = better cost vs work."""
+def compute_priority(
+    budget_mid_usd: Optional[int],
+    effort: int,
+    outcome_mult: float = 1.0,
+) -> Optional[float]:
+    """Value per unit effort, optionally scaled by historical outcome multiplier."""
     if not budget_mid_usd or budget_mid_usd <= 0 or effort <= 0:
         return None
-    return round(budget_mid_usd / float(effort), 2)
+    base = budget_mid_usd / float(effort)
+    mult = outcome_mult if outcome_mult and outcome_mult > 0 else 1.0
+    return round(base * mult, 2)
+
+
+def load_outcome_kind_multipliers(db) -> Dict[str, float]:
+    """
+    Bias priority by win rate of similar job kinds (fix/css/redesign/general).
+    Needs ≥2 closed outcomes for a kind; otherwise 1.0 (no bias).
+    Maps win_rate 0..1 → multiplier ~0.75..1.35.
+    """
+    try:
+        rows = db.execute(
+            """SELECT title, description, keyword_matches, status
+               FROM jobs
+               WHERE status IN ('won', 'lost', 'no_reply')"""
+        ).fetchall()
+    except Exception:
+        return {}
+
+    counts: Dict[str, Dict[str, int]] = {}
+    for row in rows:
+        kind = detect_job_kind(
+            row["title"] or "",
+            row["description"] or "",
+            row["keyword_matches"] or "",
+        )
+        bucket = counts.setdefault(kind, {"won": 0, "lost": 0, "no_reply": 0})
+        status = row["status"]
+        if status in bucket:
+            bucket[status] += 1
+
+    multipliers: Dict[str, float] = {}
+    for kind, c in counts.items():
+        total = c["won"] + c["lost"] + c["no_reply"]
+        if total < 2:
+            continue
+        win_rate = c["won"] / float(total)
+        multipliers[kind] = round(0.75 + 0.6 * win_rate, 3)
+    return multipliers
 
 
 def extract_rate(text: str) -> Optional[Dict[str, int]]:
@@ -366,26 +437,11 @@ def upsert_job(
     return "inserted"
 
 
-async def scrape_freelancer_rss(db):
-    """Scrape Freelancer.com public RSS for Squarespace projects. Returns (rows, new_jobs)."""
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
-        resp = await client.get(FREELANCER_RSS_URL)
-
-    if resp.status_code != 200:
-        raise Exception(f"Freelancer RSS HTTP {resp.status_code}")
-
-    content_type = (resp.headers.get("content-type") or "").lower()
-    body_prefix = resp.content[:500].lower()
-    if "html" in content_type and "xml" not in content_type and b"<rss" not in body_prefix:
-        raise Exception("Freelancer RSS returned HTML instead of a feed")
-
-    feed = feedparser.parse(resp.content)
-    if not feed.entries and getattr(feed, "bozo", False):
-        raise Exception(f"Freelancer RSS parse failed: {getattr(feed, 'bozo_exception', 'unknown')}")
-
+async def _ingest_freelancer_entries(db, entries, outcome_mults: Dict[str, float], seen_ids: set):
+    """Upsert Freelancer feed entries. Mutates seen_ids. Returns (rows, new_jobs)."""
     rows = 0
     new_jobs = []
-    for entry in feed.entries[:50]:
+    for entry in entries[:50]:
         title = clean_html(entry.get("title", ""))
         description = clean_html(entry.get("summary") or entry.get("description", ""))
         link = entry.get("link", "")
@@ -395,14 +451,6 @@ async def scrape_freelancer_rss(db):
             continue
         if not is_squarespace_job(title, description):
             continue
-
-        budget_info = parse_budget(f"{title} {description}")
-        effort = estimate_effort(title, description)
-        mid_usd = int(budget_info["budget_mid_usd"]) if budget_info else None
-        priority = compute_priority(mid_usd, effort)
-        job_type = "short-term" if is_short_term_job(title, description) or effort <= 3 else "unknown"
-        keywords = matched_keywords(title, description)
-        posted_date = parse_feed_date(published)
 
         source_id = None
         guid = str(entry.get("id") or entry.get("guid") or "")
@@ -414,6 +462,19 @@ async def scrape_freelancer_rss(db):
             source_id = id_match.group(1)
         else:
             source_id = re.sub(r"[^\w-]", "", link.rstrip("/").split("/")[-1])[:80] or link[-50:]
+
+        if source_id in seen_ids:
+            continue
+        seen_ids.add(source_id)
+
+        budget_info = parse_budget(f"{title} {description}")
+        effort = estimate_effort(title, description)
+        mid_usd = int(budget_info["budget_mid_usd"]) if budget_info else None
+        keywords = matched_keywords(title, description)
+        kind = detect_job_kind(title, description, keywords)
+        priority = compute_priority(mid_usd, effort, outcome_mults.get(kind, 1.0))
+        job_type = "short-term" if is_short_term_job(title, description) or effort <= 3 else "unknown"
+        posted_date = parse_feed_date(published)
 
         if not meets_min_score(priority):
             continue
@@ -446,7 +507,116 @@ async def scrape_freelancer_rss(db):
                 "priority_score": priority,
             })
 
+    return rows, new_jobs
+
+
+async def scrape_freelancer_rss(db):
+    """Scrape multiple Freelancer keyword RSS feeds. Returns (rows, new_jobs)."""
+    outcome_mults = load_outcome_kind_multipliers(db)
+    seen_ids: set = set()
+    rows = 0
+    new_jobs = []
+    feed_errors: List[str] = []
+
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
+        for keyword in FREELANCER_FEED_KEYWORDS:
+            url = freelancer_rss_url(keyword)
+            try:
+                resp = await client.get(url)
+            except Exception as e:
+                feed_errors.append(f"{keyword}: {e}")
+                continue
+
+            if resp.status_code != 200:
+                feed_errors.append(f"{keyword}: HTTP {resp.status_code}")
+                continue
+
+            content_type = (resp.headers.get("content-type") or "").lower()
+            body_prefix = resp.content[:500].lower()
+            if "html" in content_type and "xml" not in content_type and b"<rss" not in body_prefix:
+                feed_errors.append(f"{keyword}: HTML instead of feed")
+                continue
+
+            feed = feedparser.parse(resp.content)
+            if not feed.entries and getattr(feed, "bozo", False):
+                feed_errors.append(f"{keyword}: parse failed")
+                continue
+
+            r, jobs = await _ingest_freelancer_entries(db, feed.entries, outcome_mults, seen_ids)
+            rows += r
+            new_jobs.extend(jobs)
+
     db.commit()
+    if rows == 0 and feed_errors and not seen_ids:
+        raise Exception(f"Freelancer RSS failed: {'; '.join(feed_errors[:3])}")
+    if feed_errors:
+        print(f"Freelancer feed warnings: {'; '.join(feed_errors[:5])}")
+    return rows, new_jobs
+
+
+async def scrape_peopleperhour_rss(db):
+    """Soft-optional PPH feed. Never raises; returns (rows, new_jobs)."""
+    outcome_mults = load_outcome_kind_multipliers(db)
+    rows = 0
+    new_jobs = []
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
+            resp = await client.get(PPH_RSS_URL)
+        if resp.status_code != 200:
+            return 0, []
+        feed = feedparser.parse(resp.content)
+        if not feed.entries:
+            return 0, []
+
+        for entry in feed.entries[:40]:
+            title = clean_html(entry.get("title", ""))
+            description = clean_html(entry.get("summary") or entry.get("description", ""))
+            link = entry.get("link", "")
+            published = entry.get("published") or entry.get("updated") or ""
+            if not title or not link or not is_squarespace_job(title, description):
+                continue
+
+            source_id = re.sub(r"[^\w-]", "", link.rstrip("/").split("/")[-1])[:80] or link[-50:]
+            budget_info = parse_budget(f"{title} {description}")
+            effort = estimate_effort(title, description)
+            mid_usd = int(budget_info["budget_mid_usd"]) if budget_info else None
+            keywords = matched_keywords(title, description)
+            kind = detect_job_kind(title, description, keywords)
+            priority = compute_priority(mid_usd, effort, outcome_mults.get(kind, 1.0))
+            if not meets_min_score(priority):
+                continue
+
+            action = upsert_job(
+                db,
+                source="peopleperhour",
+                source_id=source_id,
+                title=title,
+                description=description,
+                url=link,
+                posted_date=parse_feed_date(published),
+                job_type="short-term" if is_short_term_job(title, description) or effort <= 3 else "unknown",
+                keyword_matches=keywords,
+                rate_min=int(budget_info["rate_min"]) if budget_info else None,
+                rate_max=int(budget_info["rate_max"]) if budget_info else None,
+                currency=str(budget_info["currency"]) if budget_info else "USD",
+                budget=str(budget_info["budget"]) if budget_info else None,
+                budget_mid_usd=mid_usd,
+                effort_score=effort,
+                priority_score=priority,
+            )
+            if action != "noop":
+                rows += 1
+            if action == "inserted":
+                new_jobs.append({
+                    "title": title,
+                    "url": link,
+                    "budget": str(budget_info["budget"]) if budget_info else None,
+                    "priority_score": priority,
+                })
+        db.commit()
+    except Exception as e:
+        print(f"PeoplePerHour soft-skip: {e}")
+        return 0, []
     return rows, new_jobs
 
 
@@ -531,6 +701,7 @@ async def scrape_upwork_graphql(db):
 
     rows = 0
     new_jobs = []
+    outcome_mults = load_outcome_kind_multipliers(db)
     for edge in edges[:50]:
         node = edge.get("node") or {}
         title = clean_html(node.get("title") or "")
@@ -547,7 +718,9 @@ async def scrape_upwork_graphql(db):
         budget_info = parse_budget(f"{title} {description}")
         effort = estimate_effort(title, description)
         mid_usd = int(budget_info["budget_mid_usd"]) if budget_info else None
-        priority = compute_priority(mid_usd, effort)
+        keywords = matched_keywords(title, description)
+        kind = detect_job_kind(title, description, keywords)
+        priority = compute_priority(mid_usd, effort, outcome_mults.get(kind, 1.0))
         job_type = "short-term" if is_short_term_job(title, description) or effort <= 3 else "unknown"
 
         if not meets_min_score(priority):
@@ -562,7 +735,7 @@ async def scrape_upwork_graphql(db):
             url=url,
             posted_date=posted_date,
             job_type=job_type,
-            keyword_matches=matched_keywords(title, description),
+            keyword_matches=keywords,
             rate_min=int(budget_info["rate_min"]) if budget_info else None,
             rate_max=int(budget_info["rate_max"]) if budget_info else None,
             currency=str(budget_info["currency"]) if budget_info else "USD",
@@ -589,6 +762,7 @@ async def scrape_all(db) -> Dict[str, object]:
     """Run configured sources independently; collect counts, new jobs, and errors."""
     results: Dict[str, object] = {
         "freelancer": 0,
+        "peopleperhour": 0,
         "upwork": 0,
         "total": 0,
         "errors": [],
@@ -597,6 +771,7 @@ async def scrape_all(db) -> Dict[str, object]:
     }
     errors: List[str] = []
     new_jobs: List[dict] = []
+    skipped: List[str] = []
 
     try:
         count, jobs = await scrape_freelancer_rss(db)
@@ -606,6 +781,13 @@ async def scrape_all(db) -> Dict[str, object]:
         msg = f"freelancer: {e}"
         errors.append(msg)
         print(f"Scraping error: {msg}")
+
+    try:
+        count, jobs = await scrape_peopleperhour_rss(db)
+        results["peopleperhour"] = count
+        new_jobs.extend(jobs)
+    except Exception as e:
+        print(f"PeoplePerHour soft-skip: {e}")
 
     if upwork_configured():
         try:
@@ -617,10 +799,15 @@ async def scrape_all(db) -> Dict[str, object]:
             errors.append(msg)
             print(f"Scraping error: {msg}")
     else:
-        results["skipped"] = ["upwork (missing UPWORK_CLIENT_ID/SECRET/REFRESH_TOKEN)"]
+        skipped.append("upwork (missing UPWORK_CLIENT_ID/SECRET/REFRESH_TOKEN)")
 
-    results["total"] = int(results["freelancer"] or 0) + int(results["upwork"] or 0)
+    results["total"] = (
+        int(results["freelancer"] or 0)
+        + int(results["peopleperhour"] or 0)
+        + int(results["upwork"] or 0)
+    )
     results["errors"] = errors
+    results["skipped"] = skipped
     results["new_jobs"] = new_jobs
     return results
 

@@ -1,8 +1,14 @@
 import { useState, useEffect, useCallback } from 'react'
-import { buildProposalStub } from './proposal'
+import {
+  buildProposalStub,
+  detectProposalKind,
+  PROPOSAL_KINDS,
+  type ProposalKind,
+} from './proposal'
 
-// Callers: main.tsx. API: GET/PATCH /api/jobs, /api/jobs/stats, /api/scrape-log.
-// User: "do them all" (UI improvements before alerts).
+// Callers: main.tsx. API: GET/PATCH /api/jobs (+ earnings_usd), /api/jobs/stats (+ weekly_revenue_usd).
+// Schema: jobs.earnings_usd; stats.weekly_revenue_usd.
+// User: "do them all"
 
 interface Job {
   id: number
@@ -24,6 +30,7 @@ interface Job {
   budget_mid_usd: number | null
   effort_score: number | null
   priority_score: number | null
+  earnings_usd: number | null
 }
 
 interface JobsStats {
@@ -31,6 +38,7 @@ interface JobsStats {
   by_source: Record<string, number>
   by_type: Record<string, number>
   recent_7days: number
+  weekly_revenue_usd?: number
 }
 
 type JobStatus = 'new' | 'interested' | 'applied' | 'skipped' | 'won' | 'lost' | 'no_reply'
@@ -125,6 +133,7 @@ function App() {
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
 
   const [applyJob, setApplyJob] = useState<Job | null>(null)
+  const [proposalKind, setProposalKind] = useState<ProposalKind>('general')
   const [proposalText, setProposalText] = useState('')
   const [copied, setCopied] = useState(false)
   const [markingApplied, setMarkingApplied] = useState(false)
@@ -205,34 +214,67 @@ function App() {
   const closeApplyDrawer = useCallback(() => {
     setApplyJob(null)
     setProposalText('')
+    setProposalKind('general')
     setCopied(false)
     setMarkingApplied(false)
   }, [])
 
+  const patchJob = useCallback(async (jobId: number, body: Record<string, unknown>) => {
+    const response = await fetch(`/api/jobs/${jobId}`, {
+      method: 'PATCH',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (response.status === 401) {
+      window.location.href = '/login'
+      return false
+    }
+    if (!response.ok) throw new Error('Failed to update job')
+    return true
+  }, [])
+
   const setJobStatus = useCallback(async (jobId: number, status: JobStatus) => {
     try {
-      const response = await fetch(`/api/jobs/${jobId}`, {
-        method: 'PATCH',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status }),
-      })
-      if (response.status === 401) {
-        window.location.href = '/login'
-        return
-      }
-      if (!response.ok) throw new Error('Failed to update job')
+      const ok = await patchJob(jobId, { status })
+      if (!ok) return
       setJobs(prev => prev.filter(j => j.id !== jobId))
       fetchStats()
       setApplyJob(prev => (prev?.id === jobId ? null : prev))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to update job')
     }
-  }, [])
+  }, [patchJob])
+
+  const markWon = useCallback(async (job: Job) => {
+    const hint = job.budget_mid_usd != null ? String(job.budget_mid_usd) : ''
+    const raw = window.prompt('Earnings USD for this win? (blank to skip)', hint)
+    if (raw === null) return
+    const trimmed = raw.trim()
+    const payload: Record<string, unknown> = { status: 'won' }
+    if (trimmed !== '') {
+      const amount = Number(trimmed)
+      if (Number.isNaN(amount) || amount < 0) {
+        setError('Earnings must be a non-negative number')
+        return
+      }
+      payload.earnings_usd = amount
+    }
+    try {
+      const ok = await patchJob(job.id, payload)
+      if (!ok) return
+      setJobs(prev => prev.filter(j => j.id !== job.id))
+      fetchStats()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to mark won')
+    }
+  }, [patchJob])
 
   const openApplyDrawer = useCallback((job: Job) => {
+    const kind = detectProposalKind(job)
     setApplyJob(job)
-    setProposalText(buildProposalStub(job))
+    setProposalKind(kind)
+    setProposalText(buildProposalStub(job, kind))
     setCopied(false)
   }, [])
 
@@ -389,7 +431,7 @@ function App() {
       if (status === 'applied') {
         if (e.key === '1') {
           e.preventDefault()
-          setJobStatus(focusedJob.id, 'won')
+          markWon(focusedJob)
         } else if (e.key === '2') {
           e.preventDefault()
           setJobStatus(focusedJob.id, 'lost')
@@ -401,7 +443,7 @@ function App() {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [applyJob, filteredJobs, focusedJob, closeApplyDrawer, openApplyDrawer, setJobStatus])
+  }, [applyJob, filteredJobs, focusedJob, closeApplyDrawer, openApplyDrawer, setJobStatus, markWon])
 
   const triageActions = (job: Job) => {
     switch (job.status as JobStatus) {
@@ -424,7 +466,7 @@ function App() {
       case 'applied':
         return (
           <div className="triage-group" role="group" aria-label="Outcome">
-            <button type="button" className="triage-button triage-primary" onClick={() => setJobStatus(job.id, 'won')}>Won</button>
+            <button type="button" className="triage-button triage-primary" onClick={() => markWon(job)}>Won</button>
             <button type="button" className="triage-button triage-secondary" onClick={() => setJobStatus(job.id, 'lost')}>Lost</button>
             <button type="button" className="triage-button triage-secondary" onClick={() => setJobStatus(job.id, 'no_reply')}>No reply</button>
             <button type="button" className="triage-button triage-ghost" onClick={() => setJobStatus(job.id, 'interested')}>Back</button>
@@ -472,6 +514,12 @@ function App() {
           <dt>Type</dt>
           <dd>{job.job_type || '—'}</dd>
         </div>
+        {job.status === 'won' && (
+          <div>
+            <dt>Earned</dt>
+            <dd>{job.earnings_usd != null ? `$${job.earnings_usd}` : '—'}</dd>
+          </div>
+        )}
       </dl>
       {job.keyword_matches && (
         <p className="job-preview-keywords">Keywords: {job.keyword_matches}</p>
@@ -494,6 +542,7 @@ function App() {
   const jobTypes = [...new Set(jobs.map(j => j.job_type).filter(Boolean))]
   const sources = [...new Set(jobs.map(j => j.source).filter(Boolean))]
   const closedWinRate = winRate(stats)
+  const weeklyRevenue = stats?.weekly_revenue_usd
 
   return (
     <div className={`dashboard density-${density}`}>
@@ -555,6 +604,9 @@ function App() {
         </div>
         {statusFilter === 'closed' && closedWinRate && (
           <span className="win-rate-chip">{closedWinRate}</span>
+        )}
+        {typeof weeklyRevenue === 'number' && weeklyRevenue > 0 && (
+          <span className="revenue-chip">${Math.round(weeklyRevenue)} this week</span>
         )}
       </div>
 
@@ -805,6 +857,22 @@ function App() {
               <span>{formatBudget(applyJob)}</span>
               <span>{effortLabel(applyJob.effort_score)}</span>
               <span>{applyJob.source}</span>
+            </div>
+
+            <div className="proposal-kind-row" role="group" aria-label="Proposal type">
+              {PROPOSAL_KINDS.map(k => (
+                <button
+                  key={k.key}
+                  type="button"
+                  className={`proposal-kind-pill ${proposalKind === k.key ? 'active' : ''}`}
+                  onClick={() => {
+                    setProposalKind(k.key)
+                    setProposalText(buildProposalStub(applyJob, k.key))
+                  }}
+                >
+                  {k.label}
+                </button>
+              ))}
             </div>
 
             <label className="apply-drawer-label" htmlFor="proposal-text">

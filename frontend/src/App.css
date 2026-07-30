@@ -104,6 +104,39 @@ body {
   padding: 0.35rem 0.7rem;
 }
 
+.revenue-chip {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--color-primary);
+  background: rgba(38, 70, 83, 0.1);
+  border-radius: 999px;
+  padding: 0.35rem 0.7rem;
+}
+
+.proposal-kind-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.75rem;
+}
+
+.proposal-kind-pill {
+  border: 1px solid var(--color-border, #d0d5dd);
+  background: transparent;
+  color: var(--color-text, #344054);
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.3rem 0.65rem;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.proposal-kind-pill.active {
+  background: rgba(42, 157, 143, 0.14);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
 .dashboard-header h1 {
   color: var(--color-primary);
   font-size: 1.8rem;

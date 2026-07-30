@@ -1,8 +1,8 @@
 """WhatsApp alerts via CallMeBot.
 
 Callers: scrapers/squarespace_jobs.scrape() after new inserts.
-Env: WHATSAPP_PHONE, WHATSAPP_APIKEY, ALERT_MIN_SCORE (default 50; also gates DB inserts), ALERT_MAX_PER_SCRAPE (default 5).
-No data files. User: "CallMeBot api key: 3556567" — key must live in Railway env only.
+Env: WHATSAPP_PHONE, WHATSAPP_APIKEY, ALERT_MIN_SCORE (default 50; also gates DB inserts),
+     ALERT_MAX_PER_SCRAPE (default 5), ALERT_DIGEST (default 1 = one summary message).
 """
 from __future__ import annotations
 
@@ -32,6 +32,10 @@ def alert_max_per_scrape() -> int:
         return 5
 
 
+def alert_digest_enabled() -> bool:
+    return os.getenv("ALERT_DIGEST", "1") != "0"
+
+
 def format_job_alert(job: Dict[str, Any]) -> str:
     title = job.get("title") or "New Squarespace job"
     score = job.get("priority_score")
@@ -39,6 +43,19 @@ def format_job_alert(job: Dict[str, Any]) -> str:
     url = job.get("url") or ""
     score_bit = f"Score {score}" if score is not None else "Score n/a"
     return f"New gig: {title}\n{score_bit} · {budget}\n{url}"
+
+
+def format_digest(jobs: List[Dict[str, Any]]) -> str:
+    lines = [f"{len(jobs)} new Squarespace gig(s) ≥{int(alert_min_score())}:"]
+    for i, job in enumerate(jobs, 1):
+        title = (job.get("title") or "Untitled")[:80]
+        score = job.get("priority_score")
+        budget = job.get("budget") or "—"
+        url = job.get("url") or ""
+        lines.append(f"{i}. {title} ({score} · {budget})")
+        if url:
+            lines.append(f"   {url}")
+    return "\n".join(lines)
 
 
 async def send_whatsapp(text: str) -> Optional[str]:
@@ -67,7 +84,7 @@ async def send_whatsapp(text: str) -> Optional[str]:
 
 
 async def notify_new_high_score_jobs(jobs: List[Dict[str, Any]]) -> Optional[str]:
-    """Alert for newly inserted jobs at/above ALERT_MIN_SCORE. Caps per scrape."""
+    """Alert for newly inserted jobs at/above ALERT_MIN_SCORE. Digest by default."""
     if not alerts_configured() or not jobs:
         return None
 
@@ -83,6 +100,11 @@ async def notify_new_high_score_jobs(jobs: List[Dict[str, Any]]) -> Optional[str
     ]
     eligible.sort(key=lambda j: float(j.get("priority_score") or 0), reverse=True)
     eligible = eligible[:cap]
+    if not eligible:
+        return None
+
+    if alert_digest_enabled():
+        return await send_whatsapp(format_digest(eligible))
 
     errors: List[str] = []
     for job in eligible:

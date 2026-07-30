@@ -97,7 +97,7 @@ async def startup():
         db.commit()
         print("Database initialized successfully")
 
-        interval = int(os.getenv("SCRAPE_INTERVAL_MINUTES", "60"))
+        interval = int(os.getenv("SCRAPE_INTERVAL_MINUTES", "30"))
         if interval > 0:
             scheduler.add_job(
                 scheduled_refresh_jobs,
@@ -136,7 +136,7 @@ async def health():
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
         "database": default_db_path(),
-        "scrape_interval_minutes": int(os.getenv("SCRAPE_INTERVAL_MINUTES", "60")),
+        "scrape_interval_minutes": int(os.getenv("SCRAPE_INTERVAL_MINUTES", "30")),
     }
 
 @app.get("/login")
@@ -404,6 +404,15 @@ async def update_job(job_id: int, updates: dict):
         elif key == "job_type":
             set_clauses.append("job_type = ?")
             values.append(value)
+        elif key == "earnings_usd":
+            try:
+                amount = None if value in (None, "") else float(value)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="earnings_usd must be a number")
+            if amount is not None and amount < 0:
+                raise HTTPException(status_code=400, detail="earnings_usd must be >= 0")
+            set_clauses.append("earnings_usd = ?")
+            values.append(amount)
 
     if set_clauses:
         set_clauses.append("updated_at = ?")
@@ -497,11 +506,23 @@ async def get_jobs_stats():
         (recent_date,)
     ).fetchone()[0]
 
+    week_ago = (datetime.utcnow() - timedelta(days=7)).isoformat()
+    weekly_row = db.execute(
+        """SELECT COALESCE(SUM(earnings_usd), 0) AS total
+           FROM jobs
+           WHERE status = 'won'
+             AND earnings_usd IS NOT NULL
+             AND COALESCE(updated_at, created_at) >= ?""",
+        (week_ago,),
+    ).fetchone()
+    weekly_revenue = float(weekly_row["total"] or 0) if weekly_row else 0.0
+
     return {
         "by_status": {row["status"]: row["count"] for row in status_counts},
         "by_source": {row["source"]: row["count"] for row in source_counts},
         "by_type": {row["job_type"]: row["count"] for row in type_counts},
-        "recent_7days": recent_count
+        "recent_7days": recent_count,
+        "weekly_revenue_usd": weekly_revenue,
     }
 
 @app.get("/api/scrape-log")
