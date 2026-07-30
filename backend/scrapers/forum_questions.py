@@ -1,22 +1,20 @@
 """Forum question scraper.
 
-Monitors Squarespace forums for unanswered CSS/JS questions and generates
+Monitors Stack Overflow for Squarespace CSS/JS questions and generates
 AI-powered answer suggestions using Qwen3 8B running locally in Docker.
 
 Callers: backend/main.py refresh_forum_background → scrape()
-APIs: Squarespace forum web scraping, Qwen3 8B local model via llama-cpp-python
+APIs: Stack Exchange API, Qwen3 8B local model via llama-cpp-python
 Schema: forum_questions (source, source_id, title, ai_answer, status, ...)
 """
 import re
 import httpx
-from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import urljoin
 import html
 import os
 
-from db import log_scrape_start, log_scrape_end, is_scraper_running, purge_stale_data
+from db import log_scrape_start, log_scrape_end, is_scraper_running
 
 USER_AGENT = "alexek-dashboard/1.0 (+https://hq.alexek.com)"
 
@@ -181,118 +179,104 @@ async def upsert_question(db, question_data: Dict) -> str:
         ))
         return "inserted"
 
-async def scrape_squarespace_forum(db, client: httpx.AsyncClient) -> Tuple[int, int]:
-    """Scrape Squarespace forum for unanswered CSS/JS questions. Returns (rows, new_questions)."""
+async def scrape_stackoverflow(db, client: httpx.AsyncClient) -> Tuple[int, int]:
+    """Scrape Stack Overflow for Squarespace CSS/JS questions. Returns (rows, new_questions)."""
     rows = 0
     new_questions = 0
 
-    # Squarespace forum URLs - focusing on recent discussions across all categories
-    forum_urls = [
-        "https://forum.squarespace.com/categories/custom-css.14/",
-        "https://forum.squarespace.com/categories/javascript.15/",
-        "https://forum.squarespace.com/categories/design-styles.16/",
-        "https://forum.squarespace.com/categories/developer-platform.17/"
-    ]
+    # Search terms for Squarespace CSS/JS questions
+    search_tags = ['squarespace', 'css', 'javascript']
 
     try:
-        for forum_url in forum_urls:
-            print(f"Scraping forum: {forum_url}")
+        for tag in search_tags:
+            print(f"🔍 Searching Stack Overflow for: {tag}")
+
+            # Stack Exchange API - search for recent questions with these tags
+            api_url = f"https://api.stackexchange.com/2.3/questions"
+            params = {
+                'order': 'desc',
+                'sort': 'creation',
+                'tagged': tag,
+                'site': 'stackoverflow',
+                'filter': 'withbody',  # Include question body
+                'pagesize': 50,
+                'fromdate': int((datetime.utcnow() - timedelta(days=7)).timestamp())  # Last 7 days
+            }
 
             try:
-                resp = await client.get(forum_url, timeout=30)
+                resp = await client.get(api_url, params=params, timeout=30)
                 if resp.status_code != 200:
-                    print(f"Failed to fetch {forum_url}: HTTP {resp.status_code}")
+                    print(f"Failed to fetch Stack Overflow: HTTP {resp.status_code}")
                     continue
 
-                soup = BeautifulSoup(resp.content, 'html.parser')
+                data = resp.json()
+                questions = data.get('items', [])
 
-                # Find recent discussion threads - adjust selectors based on actual HTML structure
-                # These selectors may need to be adjusted based on the actual forum structure
-                discussion_links = soup.find_all('a', href=re.compile(r'/discussion/\d+/'))
+                print(f"Found {len(questions)} questions for tag: {tag}")
 
-                print(f"Found {len(discussion_links)} discussion threads")
+                for question in questions:
+                    title = question.get('title', '')
+                    body = question.get('body', '')
+                    question_id = question.get('question_id')
+                    creation_date = question.get('creation_date')
+                    answer_count = question.get('answer_count', 0)
+                    is_answered = question.get('is_answered', False)
 
-                for link in discussion_links[:25]:  # Limit to 25 per category
-                    href = link.get('href', '')
-                    if not href:
+                    # Skip if already has answers (we want unanswered questions)
+                    if answer_count > 0 or is_answered:
                         continue
 
-                    # Build full URL
-                    full_url = urljoin(forum_url, href)
+                    # Clean HTML from body
+                    description = clean_html(body)
 
-                    # Generate source_id from URL
-                    source_id = re.sub(r"[^\w-]", "", href.rstrip("/").split("/")[-1])[:80]
+                    # Check if this is CSS/JS/design related
+                    if not is_forum_question(title, description):
+                        continue
+
+                    source_id = str(question_id)
 
                     # Check if already exists
                     existing = db.execute(
                         "SELECT id FROM forum_questions WHERE source = ? AND source_id = ?",
-                        ("squarespace_forum", source_id)
+                        ("stackoverflow", source_id)
                     ).fetchone()
 
                     if existing:
                         rows += 1
                         continue
 
-                    # Get the discussion page to extract full details
-                    try:
-                        discussion_resp = await client.get(full_url, timeout=20)
-                        if discussion_resp.status_code != 200:
-                            continue
+                    # Build question data
+                    question_data = {
+                        "source": "stackoverflow",
+                        "source_id": source_id,
+                        "title": title,
+                        "description": description[:1000],  # Limit description length
+                        "url": f"https://stackoverflow.com/questions/{question_id}",
+                        "comments_count": answer_count,
+                        "created_at": datetime.fromtimestamp(creation_date).isoformat() if creation_date else datetime.utcnow().isoformat()
+                    }
 
-                        discussion_soup = BeautifulSoup(discussion_resp.content, 'html.parser')
+                    # Generate AI answer
+                    print(f"Generating AI answer for: {title[:50]}...")
+                    ai_answer = generate_ai_answer(question_data)
+                    if ai_answer:
+                        question_data["ai_answer"] = ai_answer
+                        question_data["answer_generated_at"] = datetime.utcnow().isoformat()
+                        print(f"✓ AI answer generated for: {title[:30]}")
+                    else:
+                        print(f"✗ No AI answer generated for: {title[:30]}")
 
-                        # Extract title
-                        title_elem = discussion_soup.find('h1') or discussion_soup.find('title')
-                        title = clean_html(title_elem.get_text()) if title_elem else "Unknown Title"
-
-                        # Extract description/content
-                        content_elem = discussion_soup.find('div', class_='discussion-content') or \
-                                     discussion_soup.find('div', class_='post-content')
-
-                        description = ""
-                        if content_elem:
-                            description = clean_html(content_elem.get_text())
-
-                        # Check if this is CSS/JS/design related
-                        if not is_forum_question(title, description):
-                            continue
-
-                        # Build question data
-                        question_data = {
-                            "source": "squarespace_forum",
-                            "source_id": source_id,
-                            "title": title,
-                            "description": description[:1000],  # Limit description length
-                            "url": full_url,
-                            "comments_count": 0,  # Will be determined by user triage
-                            "created_at": datetime.utcnow().isoformat()
-                        }
-
-                        # Generate AI answer
-                        print(f"Generating AI answer for: {title[:50]}...")
-                        ai_answer = generate_ai_answer(question_data)
-                        if ai_answer:
-                            question_data["ai_answer"] = ai_answer
-                            question_data["answer_generated_at"] = datetime.utcnow().isoformat()
-                            print(f"✓ AI answer generated for: {title[:30]}")
-                        else:
-                            print(f"✗ No AI answer generated for: {title[:30]}")
-
-                        status = await upsert_question(db, question_data)
-                        if status == "inserted":
-                            new_questions += 1
-                        rows += 1
-
-                    except Exception as e:
-                        print(f"Error fetching discussion {full_url}: {e}")
-                        continue
+                    status = await upsert_question(db, question_data)
+                    if status == "inserted":
+                        new_questions += 1
+                    rows += 1
 
             except Exception as e:
-                print(f"Error scraping forum {forum_url}: {e}")
+                print(f"Error scraping Stack Overflow for tag {tag}: {e}")
                 continue
 
     except Exception as e:
-        print(f"Error in forum scraping: {e}")
+        print(f"Error in Stack Overflow scraping: {e}")
 
     return rows, new_questions
 
@@ -304,7 +288,7 @@ async def scrape(db) -> Dict[str, object]:
     log_id = log_scrape_start(db, "forum_questions")
 
     results = {
-        "squarespace_forum": 0,
+        "stackoverflow": 0,
         "total_questions": 0,
         "new_questions": 0,
         "status": "running",
@@ -314,18 +298,18 @@ async def scrape(db) -> Dict[str, object]:
     try:
         async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
             try:
-                count, new_q = await scrape_squarespace_forum(db, client)
-                results["squarespace_forum"] = count
+                count, new_q = await scrape_stackoverflow(db, client)
+                results["stackoverflow"] = count
                 results["total_questions"] += count
                 results["new_questions"] += new_q
             except Exception as scrape_error:
-                error_msg = f"Forum scraping failed: {str(scrape_error)}"
+                error_msg = f"Stack Overflow scraping failed: {str(scrape_error)}"
                 results["errors"].append(error_msg)
                 print(error_msg)
 
         db.commit()
 
-        # Clean up old forum questions (similar to jobs system)
+        # Clean up old forum questions
         try:
             purge_forum_questions(db)
         except Exception as cleanup_error:
