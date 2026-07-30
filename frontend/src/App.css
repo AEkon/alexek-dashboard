@@ -656,6 +656,19 @@ body {
   .keywords {
     max-width: 150px;
   }
+
+  .forum-table {
+    font-size: 0.8rem;
+  }
+
+  .forum-table th,
+  .forum-table td {
+    padding: 0.5rem 0.75rem;
+  }
+
+  .forum-title {
+    min-width: 150px;
+  }
 }
 
 .score-cell .score {
@@ -1163,4 +1176,85 @@ a.apply-drawer-open {
 /* Forum section specific styles */
 .forum-section {
   /* Inherits existing styles */
+}
+
+/* Forum table styles (similar to jobs but forum-specific) */
+.forum-table-container {
+  background-color: white;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  overflow-x: auto;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.forum-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.forum-table thead {
+  background-color: var(--color-primary);
+  color: white;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+
+.forum-table th {
+  padding: 0.75rem 1rem;
+  text-align: left;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.forum-table th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.forum-table th.sortable:hover {
+  background-color: #632930;
+}
+
+.forum-table tbody tr {
+  border-bottom: 1px solid var(--color-border);
+  transition: background-color 0.1s;
+}
+
+.forum-table tbody tr:hover {
+  background-color: rgba(114, 47, 55, 0.05);
+}
+
+.forum-table td {
+  padding: 0.75rem 1rem;
+  vertical-align: top;
+}
+
+/* Forum title styling */
+.forum-title {
+  min-width: 250px;
+}
+
+.forum-title > div:first-child {
+  font-weight: 600;
+  color: var(--color-primary);
+  margin-bottom: 0.25rem;
+}
+
+.forum-description {
+  font-size: 0.85rem;
+  color: var(--color-text);
+  opacity: 0.8;
+  line-height: 1.4;
+}
+
+/* Forum section badges */
+.forum-section .source-badge {
+  background-color: rgba(42, 157, 143, 0.1);
+  color: var(--color-accent);
+  padding: 0.2rem 0.5rem;
+  border-radius: 3px;
+  font-size: 0.8rem;
+  font-weight: 500;
 }

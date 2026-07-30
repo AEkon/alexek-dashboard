@@ -164,6 +164,16 @@ async def scrape_forum_rss(db, rss_url: str, source_name: str, client: httpx.Asy
             # Try to get comment count from various RSS fields
             if hasattr(entry, 'slash_comments'):
                 comments = int(entry.slash_comments) if entry.slash_comments else 0
+            elif hasattr(entry, 'wfw_commentrss'):
+                # Has comment RSS but no count - need to scrape
+                comments = -1  # Unknown, will check page
+            elif 'comment_count' in entry:
+                comments = int(entry.comment_count) if entry.comment_count else 0
+
+            # Log first entry to debug RSS structure
+            if rows == 0:
+                print(f"RSS Entry debug: title={title[:30]}, link={link[:50]}, comments={comments}")
+                print(f"Available fields: {list(entry.keys())}")
 
             published = entry.get("published") or entry.get("updated") or datetime.utcnow().isoformat()
 
@@ -174,9 +184,13 @@ async def scrape_forum_rss(db, rss_url: str, source_name: str, client: httpx.Asy
             if not is_forum_question(title, description):
                 continue
 
-            # Only unanswered questions (comments = 0)
-            if comments != 0:
+            # Skip if we know there are comments (when count > 0)
+            if comments > 0:
                 continue
+
+            # For unknown comment counts, we'll include them and check the page later
+            if comments == -1:
+                print(f"Unknown comment count for: {title[:40]} - will check page")
 
             # Generate source_id from URL
             source_id = re.sub(r"[^\w-]", "", link.rstrip("/").split("/")[-1])[:80] or link[-50:]
@@ -198,7 +212,7 @@ async def scrape_forum_rss(db, rss_url: str, source_name: str, client: httpx.Asy
                 "title": title,
                 "description": description,
                 "url": link,
-                "comments_count": comments,
+                "comments_count": 0 if comments == -1 else comments,
                 "created_at": published
             }
 

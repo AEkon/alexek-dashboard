@@ -209,8 +209,8 @@ export default function Forum() {
           <p>{EMPTY_COPY[activeTab]}</p>
         </div>
       ) : (
-        <div className="jobs-table-container">
-          <table className="jobs-table">
+        <div className="forum-table-container">
+          <table className="forum-table">
             <thead>
               <tr>
                 <th onClick={() => {/* TODO: Add sorting */}} className="sortable">
@@ -231,9 +231,9 @@ export default function Forum() {
                   onClick={() => setExpandedId(expandedId === question.id ? null : question.id)}
                 >
                   <td className="title-cell">
-                    <div className="job-title">{question.title}</div>
+                    <div className="forum-title">{question.title}</div>
                     {expandedId === question.id && (
-                      <div className="job-description">
+                      <div className="forum-description">
                         <p>{question.description}</p>
                         {question.ai_answer && (
                           <div className="ai-answer-box">
