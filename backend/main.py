@@ -402,6 +402,50 @@ async def search_jobs(q: str, status: str = "new", limit: int = 50):
 
     return [dict(job) for job in jobs]
 
+
+
+@app.post("/api/jobs/{job_id}/generate")
+async def generate_job_proposal(job_id: int):
+    """Manually generate Freelancer proposal + bid amount + days for a job."""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    job = db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    result = squarespace_jobs.generate_ai_proposal(dict(job))
+    if not result:
+        raise HTTPException(
+            status_code=502,
+            detail="AI generation failed. Check GROQ_API_KEY and try again.",
+        )
+
+    generated_at = datetime.utcnow().isoformat()
+    db.execute(
+        """UPDATE jobs
+           SET ai_proposal = ?, ai_bid_amount = ?, ai_bid_days = ?,
+               proposal_generated_at = ?, updated_at = ?
+           WHERE id = ?""",
+        (
+            result["proposal"],
+            result["bid_amount"],
+            result["days"],
+            generated_at,
+            generated_at,
+            job_id,
+        ),
+    )
+    db.commit()
+
+    return {
+        "status": "generated",
+        "ai_proposal": result["proposal"],
+        "ai_bid_amount": result["bid_amount"],
+        "ai_bid_days": result["days"],
+        "proposal_generated_at": generated_at,
+    }
+
 @app.patch("/api/jobs/{job_id}")
 async def update_job(job_id: int, updates: dict):
     """Update job status or other fields."""
@@ -628,14 +672,54 @@ async def update_forum_question(question_id: int, updates: dict):
     if not update_parts:
         raise HTTPException(status_code=400, detail="No valid fields to update")
 
+    update_parts.append("updated_at = ?")
+    params.append(datetime.now(timezone.utc).isoformat())
     params.append(question_id)
     db.execute(
-        f"UPDATE forum_questions SET {', '.join(update_parts)}, updated_at = ? WHERE id = ?",
-        params + [datetime.utcnow().isoformat()]
+        f"UPDATE forum_questions SET {', '.join(update_parts)} WHERE id = ?",
+        params,
     )
     db.commit()
 
     return {"status": "updated"}
+
+
+@app.post("/api/forum/questions/{question_id}/generate")
+async def generate_forum_answer(question_id: int):
+    """Manually generate an AI answer suggestion for a forum question."""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    question = db.execute(
+        "SELECT id, source, source_id, title, description, url FROM forum_questions WHERE id = ?",
+        (question_id,),
+    ).fetchone()
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    question_data = dict(question)
+    ai_answer = forum_questions.generate_ai_answer(question_data)
+    if not ai_answer:
+        raise HTTPException(
+            status_code=502,
+            detail="AI generation failed. Check GROQ_API_KEY and try again.",
+        )
+
+    generated_at = datetime.now(timezone.utc).isoformat()
+    db.execute(
+        """UPDATE forum_questions
+           SET ai_answer = ?, answer_generated_at = ?, updated_at = ?
+           WHERE id = ?""",
+        (ai_answer, generated_at, generated_at, question_id),
+    )
+    db.commit()
+
+    return {
+        "status": "generated",
+        "ai_answer": ai_answer,
+        "answer_generated_at": generated_at,
+    }
+
 
 @app.get("/api/forum/stats")
 async def get_forum_stats():

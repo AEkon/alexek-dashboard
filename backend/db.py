@@ -147,6 +147,10 @@ def migrate(conn: sqlite3.Connection) -> None:
         "ALTER TABLE jobs ADD COLUMN priority_score REAL",
         "ALTER TABLE jobs ADD COLUMN budget_mid_usd INTEGER",
         "ALTER TABLE jobs ADD COLUMN earnings_usd REAL",
+        "ALTER TABLE jobs ADD COLUMN ai_proposal TEXT",
+        "ALTER TABLE jobs ADD COLUMN ai_bid_amount REAL",
+        "ALTER TABLE jobs ADD COLUMN ai_bid_days INTEGER",
+        "ALTER TABLE jobs ADD COLUMN proposal_generated_at TEXT",
         "CREATE INDEX IF NOT EXISTS idx_jobs_priority_score ON jobs(priority_score)",
     ]
 

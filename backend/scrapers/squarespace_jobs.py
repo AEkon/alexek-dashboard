@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote_plus
 import html
+import json
 
 from db import purge_stale_data
 from availability import mark_unavailable_jobs
@@ -20,6 +21,150 @@ from notify import alert_min_score, notify_new_high_score_jobs
 
 USER_AGENT = "alexek-dashboard/1.0 (+https://hq.alexek.com)"
 DESCRIPTION_SNIPPET_LEN = 400
+
+PROPOSAL_SYSTEM = """You write Freelancer.com bid packages in first person as Alex.
+
+ALEX BACKGROUND (use to personalize — weave in only what fits this project; do not paste the whole bio):
+Alex is a Squarespace designer and developer specializing in custom coding (CSS, HTML, and JavaScript) for high-end, bespoke websites. While many designers stick to the drag-and-drop editor, Alex focuses on under-the-hood customization that makes a site unique, functional, and professional. Approach: technical precision and clean aesthetics — not just building sites, but digital solutions that are fully responsive, SEO-optimized, and performance-driven. Comfortable with sophisticated layouts needing custom injection and complex functionality the standard platform does not offer, without compromising site stability.
+
+Return ONLY valid JSON with these exact keys:
+{
+  "proposal": "string",
+  "bid_amount": number,
+  "days": integer
+}
+
+GREAT BID RULES (every proposal must hit all four):
+1. Engaging and well written — zero spelling or grammar errors. Natural, confident tone. No filler.
+2. Show clear understanding of THIS specific project — reference concrete details from the title/description (pages, bugs, redesign goals, CSS needs, migrations, etc.). Personalize; never send a generic Squarespace pitch.
+3. Explain how Alex's skills & experience relate to this project and the approach to working on it (custom CSS/JS when needed, clean overrides, responsive/SEO/performance, editor access, review → implement → handoff).
+4. Ask 1–2 short clarifying questions about unclear details in the listing (never invent answers — ask).
+
+Style constraints:
+- Paste-ready Freelancer cover letter, first person ("I").
+- About 6–12 sentences; short paragraphs OK. No markdown headings, bullets, or "As an AI".
+- No "Dear Hiring Manager" / "I hope this finds you well".
+- Do not invent client details, portfolio links, or past project names not provided.
+- Sign off lightly with just the name Alex if natural; no long signature block.
+
+Rules for bid_amount:
+- Numeric only (no currency symbol). Use the listing currency units (usually USD).
+- Stay inside the client budget range when one exists; prefer slightly under mid-budget when competitive.
+- If no budget, pick a realistic fixed-price for the scope.
+
+Rules for days:
+- Whole number of calendar days Freelancer requires (minimum 1).
+- Match scope: quick CSS/fix = 1–2, mid = 3–5, redesign/migration = 7–14.
+"""
+
+
+def generate_ai_proposal(job: Dict) -> Optional[Dict[str, object]]:
+    """Generate Freelancer proposal + bid amount + days via Groq. On-demand only."""
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        print("✗ GROQ_API_KEY not set — cannot generate job proposal")
+        return None
+
+    title = (job.get("title") or "").strip()
+    description = (job.get("description") or "").strip()
+    budget = job.get("budget") or "not stated"
+    mid = job.get("budget_mid_usd")
+    rate_min = job.get("rate_min")
+    rate_max = job.get("rate_max")
+    currency = (job.get("currency") or "USD").upper()
+    effort = job.get("effort_score")
+    job_type = job.get("job_type") or "unknown"
+
+    prompt = f"""Write a Freelancer.com bid for this specific project. Personalize hard to the listing.
+
+Title: {title}
+
+Description:
+{description[:1500] if description else '(no description)'}
+
+Listing budget text: {budget}
+Budget mid (USD approx): {mid if mid is not None else 'n/a'}
+Rate min/max: {rate_min} / {rate_max}
+Currency: {currency}
+Heuristic effort score (1–10): {effort if effort is not None else 'n/a'}
+Job type: {job_type}
+
+Checklist for proposal (must all be true):
+- Engaging, polished English with no typos
+- Proves you understood this exact brief (quote/paraphrase their needs)
+- Ties Alex's custom Squarespace coding skills to their requirements + your working approach
+- Ends with 1–2 clarifying questions
+
+Return JSON only with proposal, bid_amount, and days."""
+
+    if not hasattr(generate_ai_proposal, "_client"):
+        try:
+            from groq import Groq
+            generate_ai_proposal._client = Groq(api_key=api_key)
+        except Exception as e:
+            print(f"✗ Groq client init failed: {e}")
+            return None
+
+    client = generate_ai_proposal._client
+    try:
+        messages = [
+            {"role": "system", "content": PROPOSAL_SYSTEM},
+            {"role": "user", "content": prompt},
+        ]
+        try:
+            response = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=messages,
+                max_tokens=700,
+                temperature=0.45,
+                response_format={"type": "json_object"},
+            )
+        except Exception:
+            response = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=messages,
+                max_tokens=700,
+                temperature=0.45,
+            )
+        raw = (response.choices[0].message.content or "").strip()
+        if not raw:
+            return None
+
+        # Tolerate fenced ```json blocks if response_format unavailable
+        if raw.startswith("```"):
+            raw = raw.strip("`")
+            if raw.lower().startswith("json"):
+                raw = raw[4:].strip()
+        data = json.loads(raw)
+        proposal = str(data.get("proposal") or "").strip()
+        bid = data.get("bid_amount")
+        days = data.get("days")
+
+        try:
+            bid_amount = float(bid)
+        except (TypeError, ValueError):
+            return None
+        try:
+            bid_days = int(days)
+        except (TypeError, ValueError):
+            return None
+
+        if not proposal or len(proposal) < 40:
+            return None
+        if bid_amount <= 0:
+            return None
+        if bid_days < 1:
+            bid_days = 1
+
+        return {
+            "proposal": proposal,
+            "bid_amount": round(bid_amount, 2),
+            "days": bid_days,
+        }
+    except Exception as e:
+        print(f"✗ Job proposal generation failed: {e}")
+        return None
+
 
 
 def meets_min_score(priority_score) -> bool:

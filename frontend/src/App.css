@@ -1258,3 +1258,158 @@ a.apply-drawer-open {
   font-size: 0.8rem;
   font-weight: 500;
 }
+
+/* Source icons (forum + jobs) */
+.source-col {
+  width: 3rem;
+  text-align: center;
+}
+
+.source-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 4px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  background: rgba(44, 44, 44, 0.08);
+  color: var(--color-primary);
+}
+
+.source-icon--squarespace_forum,
+.source-icon--squarespace {
+  background: rgba(0, 0, 0, 0.88);
+  color: #fff;
+}
+
+.source-icon--stackoverflow {
+  background: #f48024;
+  color: #fff;
+}
+
+.source-icon--freelancer {
+  background: rgba(41, 152, 255, 0.15);
+  color: #1769aa;
+}
+
+.source-icon--peopleperhour {
+  background: rgba(255, 106, 0, 0.12);
+  color: #c45a00;
+}
+
+.source-icon--upwork {
+  background: rgba(20, 168, 0, 0.12);
+  color: #108a00;
+}
+
+/* Jobs bid advice */
+.advice-cell {
+  min-width: 11rem;
+  max-width: 16rem;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  color: rgba(44, 44, 44, 0.78);
+}
+
+.advice-summary {
+  font-weight: 500;
+}
+
+.advice-score {
+  margin-top: 0.2rem;
+  font-size: 0.72rem;
+  color: rgba(44, 44, 44, 0.45);
+}
+
+.job-advice-box {
+  background: rgba(42, 157, 143, 0.08);
+  border-left: 3px solid var(--color-accent);
+  padding: 0.75rem 1rem;
+  margin-top: 0.75rem;
+  border-radius: 0 4px 4px 0;
+}
+
+.job-advice-box strong {
+  display: block;
+  margin-bottom: 0.35rem;
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-accent);
+}
+
+.job-advice-box p {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.job-earnings {
+  margin-top: 0.4rem !important;
+  font-weight: 600;
+}
+
+/* Compact horizontal action rows */
+.forum-section .row-actions,
+.jobs-section .row-actions {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.forum-section .triage-group,
+.jobs-section .triage-group {
+  gap: 0.35rem;
+}
+
+.job-proposal-box {
+  background: rgba(42, 157, 143, 0.08);
+  border-left: 3px solid var(--color-accent);
+  padding: 0.85rem 1rem;
+  margin-top: 0.75rem;
+  border-radius: 0 4px 4px 0;
+}
+
+.job-proposal-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1.25rem;
+  margin-bottom: 0.65rem;
+  font-size: 0.85rem;
+}
+
+.job-proposal-meta strong {
+  margin-right: 0.3rem;
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-accent);
+}
+
+.job-proposal-label {
+  display: block;
+  margin-bottom: 0.35rem;
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-accent);
+}
+
+.job-proposal-text {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.advice-hint {
+  margin-top: 0.4rem !important;
+  font-size: 0.8rem;
+  color: rgba(44, 44, 44, 0.55);
+}

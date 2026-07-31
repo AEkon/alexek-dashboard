@@ -75,8 +75,19 @@ def get_time_filter(conn) -> datetime:
         from datetime import timezone
         return datetime.now(timezone.utc) - timedelta(days=7)  # Default to 7 days
 
+SYSTEM_PROMPT = """You write short Squarespace forum replies that sound like a helpful expert peer — not a chatbot.
+
+Rules:
+- Speak in first person ("I'd try…", "You can…") as a forum reply Alex could post.
+- Prefer concrete steps: which panel, which selector, which setting, or a minimal code snippet.
+- If the question lacks a URL, template, or screenshot needed to answer well, say what to check first.
+- Do not invent Squarespace features that do not exist.
+- No greetings, sign-offs, markdown headings, or "As an AI".
+- 2–4 short sentences max. One short code block only when CSS/JS is clearly required."""
+
+
 def generate_ai_answer(question: Dict) -> Optional[str]:
-    """Generate AI answer suggestion using Groq API (free tier)."""
+    """Generate AI answer suggestion using Groq API (free tier). Called on demand only."""
     print(f"🤖 Attempting AI answer generation for: {question.get('title', '')[:50]}...")
 
     api_key = os.getenv("GROQ_API_KEY")
@@ -85,15 +96,21 @@ def generate_ai_answer(question: Dict) -> Optional[str]:
         print("  Get your free API key at: https://console.groq.com/")
         return None
 
-    title = question.get("title", "")
-    description = question.get("description", "")
+    title = (question.get("title") or "").strip()
+    description = (question.get("description") or "").strip()
+    source = question.get("source") or "forum"
+    url = question.get("url") or ""
 
-    # Create a simple prompt based on the question content
-    question_text = f"{title}. {description[:200]}".strip() if description else title
-    prompt = f"""As a Squarespace expert, provide a brief, helpful answer to this forum question: "{question_text}"
+    prompt = f"""Write a draft forum reply for this Squarespace {source.replace('_', ' ')} question.
 
-If the question is about CSS/JS code, provide a simple solution. If it's about design/configuration, give clear guidance.
-Keep your answer under 2 sentences and be practical."""
+Title: {title}
+
+Question details:
+{description[:1200] if description else '(no body provided — answer from the title only)'}
+
+Source link (for context, do not paste unless useful): {url or 'n/a'}
+
+Focus on the most likely fix. If CSS/JS is needed, give the smallest working snippet and where to paste it (Custom CSS, Code Injection, or Code Block)."""
 
     # Initialize Groq client (lazy load - only for first call)
     if not hasattr(generate_ai_answer, '_client'):
@@ -116,13 +133,13 @@ Keep your answer under 2 sentences and be practical."""
     try:
         print("🧠 Generating AI response via Groq...")
         response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",  # Fast, free tier model
+            model="llama-3.1-8b-instant",
             messages=[
-                {"role": "system", "content": "You are a Squarespace expert who provides practical, concise answers to CSS/JS questions."},
+                {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=150,
-            temperature=0.6,
+            max_tokens=280,
+            temperature=0.45,
             stop=["\n\n\n", "###", "User:", "Question:"]
         )
 
@@ -289,26 +306,19 @@ async def scrape_squarespace_rss(db, client: httpx.AsyncClient, cutoff_time: dat
             # Generate source_id from URL
             source_id = re.sub(r"[^\w-]", "", link.rstrip("/").split("/")[-1])[:80] or link[-50:]
 
-            # Check if already exists and get AI answer status
+            # Skip duplicates — AI answers are generated on demand from the UI
             existing = db.execute(
-                "SELECT id, ai_answer FROM forum_questions WHERE source = ? AND source_id = ?",
+                "SELECT id FROM forum_questions WHERE source = ? AND source_id = ?",
                 ("squarespace_forum", source_id)
             ).fetchone()
 
-            needs_ai_answer = False
             if existing:
-                print(f"📋 Found existing question: {title[:30]}... (has AI: {existing['ai_answer'] is not None})")
-                # If existing post has no AI answer, flag it for generation
-                if existing["ai_answer"] is None:
-                    needs_ai_answer = True
-                    print(f"🔄 Needs AI answer generation")
-                else:
-                    rows += 1
-                    continue
-            else:
-                print(f"🆕 New question: {title[:30]}...")
+                rows += 1
+                continue
 
-            # Build question data
+            print(f"🆕 New question: {title[:30]}...")
+
+            # Build question data (AI answers are generated on demand from the UI)
             question_data = {
                 "source": "squarespace_forum",
                 "source_id": source_id,
@@ -318,19 +328,6 @@ async def scrape_squarespace_rss(db, client: httpx.AsyncClient, cutoff_time: dat
                 "comments_count": 0,  # Don't track comment counts for RSS
                 "created_at": published_dt.isoformat() if published_dt else datetime.now(timezone.utc).isoformat()
             }
-
-            # Generate AI answer for new posts or existing posts without AI answers
-            if not existing or needs_ai_answer:
-                print(f"🤖 Triggering AI answer generation for: {title[:50]}...")
-                ai_answer = generate_ai_answer(question_data)
-                if ai_answer:
-                    question_data["ai_answer"] = ai_answer
-                    question_data["answer_generated_at"] = datetime.now(timezone.utc).isoformat()
-                    print(f"✓ AI answer generated for: {title[:30]}")
-                else:
-                    print(f"✗ No AI answer generated for: {title[:30]}")
-            else:
-                print(f"⏭️ Skipping AI generation (already has answer)")
 
             status = await upsert_question(db, question_data)
             print(f"📝 Database status: {status}")
@@ -416,22 +413,16 @@ async def scrape_stackoverflow(db, client: httpx.AsyncClient, cutoff_time: datet
 
                     source_id = str(question_id)
 
-                    # Check if already exists and get AI answer status
                     existing = db.execute(
-                        "SELECT id, ai_answer FROM forum_questions WHERE source = ? AND source_id = ?",
+                        "SELECT id FROM forum_questions WHERE source = ? AND source_id = ?",
                         ("stackoverflow", source_id)
                     ).fetchone()
 
-                    needs_ai_answer = False
                     if existing:
-                        # If existing post has no AI answer, flag it for generation
-                        if existing["ai_answer"] is None:
-                            needs_ai_answer = True
-                        else:
-                            rows += 1
-                            continue
+                        rows += 1
+                        continue
 
-                    # Build question data
+                    # Build question data (AI answers are generated on demand from the UI)
                     question_data = {
                         "source": "stackoverflow",
                         "source_id": source_id,
@@ -441,17 +432,6 @@ async def scrape_stackoverflow(db, client: httpx.AsyncClient, cutoff_time: datet
                         "comments_count": answer_count,
                         "created_at": datetime.fromtimestamp(creation_date, tz=timezone.utc).isoformat() if creation_date else datetime.now(timezone.utc).isoformat()
                     }
-
-                    # Generate AI answer for new posts or existing posts without AI answers
-                    if not existing or needs_ai_answer:
-                        print(f"Generating AI answer for: {title[:50]}...")
-                        ai_answer = generate_ai_answer(question_data)
-                        if ai_answer:
-                            question_data["ai_answer"] = ai_answer
-                            question_data["answer_generated_at"] = datetime.now(timezone.utc).isoformat()
-                            print(f"✓ AI answer generated for: {title[:30]}")
-                        else:
-                            print(f"✗ No AI answer generated for: {title[:30]}")
 
                     status = await upsert_question(db, question_data)
                     if status == "inserted":
@@ -577,18 +557,11 @@ async def scrape(db) -> Dict[str, object]:
     cutoff_time = get_time_filter(db)
     print(f"🕐 Using time filter: since {cutoff_time.isoformat()}")
 
-    # Check existing questions without AI answers
-    existing_no_ai = db.execute(
-        "SELECT COUNT(*) FROM forum_questions WHERE ai_answer IS NULL"
-    ).fetchone()
-    print(f"📊 Existing questions without AI answers: {existing_no_ai[0]}")
-
     results = {
         "squarespace_forum": 0,
         "stackoverflow": 0,
         "total_questions": 0,
         "new_questions": 0,
-        "ai_backfilled": 0,
         "status": "running",
         "errors": []
     }
@@ -623,16 +596,7 @@ async def scrape(db) -> Dict[str, object]:
 
         db.commit()
 
-        # Backfill AI answers for existing questions (even if scraping failed)
-        try:
-            backfilled_count = await backfill_ai_answers(db)
-            results["ai_backfilled"] = backfilled_count
-            if backfilled_count > 0:
-                print(f"✓ Backfilled AI answers for {backfilled_count} existing questions")
-        except Exception as backfill_error:
-            error_msg = f"AI backfill failed: {str(backfill_error)}"
-            results["errors"].append(error_msg)
-            print(error_msg)
+        # AI answers are generated on demand from the UI — no scrape-time backfill
 
         # Send WhatsApp alerts for new forum questions
         if all_new_questions:

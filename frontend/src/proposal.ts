@@ -105,3 +105,76 @@ export function buildProposalStub(job: ProposalJob, kind?: ProposalKind): string
   lines.push('', 'Thanks,', 'Alex')
   return lines.join('\n')
 }
+
+export type JobAdvice = {
+  budgetLabel: string | null
+  suggestedOffer: string | null
+  estimatedDays: string | null
+  effortLabel: string | null
+  score: number | null
+  summary: string
+}
+
+/** Heuristic bid/days advice from parsed budget + effort (RSS has no AI fields). */
+export function buildJobAdvice(job: {
+  budget: string | null
+  rate_min?: number | null
+  rate_max?: number | null
+  currency?: string
+  budget_mid_usd?: number | null
+  effort_score: number | null
+  priority_score?: number | null
+}): JobAdvice {
+  const effort = job.effort_score
+  const mid = job.budget_mid_usd
+  const currency = job.currency || 'USD'
+  const sym = currency === 'GBP' ? '£' : currency === 'EUR' ? '€' : '$'
+
+  let estimatedDays: string | null = null
+  let effortLabel: string | null = null
+  if (effort != null) {
+    if (effort <= 2) {
+      estimatedDays = '0.5 day'
+      effortLabel = 'quick'
+    } else if (effort <= 4) {
+      estimatedDays = '1 day'
+      effortLabel = 'low'
+    } else if (effort <= 6) {
+      estimatedDays = '2–3 days'
+      effortLabel = 'mid'
+    } else if (effort <= 8) {
+      estimatedDays = '4–5 days'
+      effortLabel = 'high'
+    } else {
+      estimatedDays = '1–2 weeks'
+      effortLabel = 'large'
+    }
+  }
+
+  let suggestedOffer: string | null = null
+  if (mid != null && mid > 0) {
+    // Bid near mid-budget, slightly under average to stay competitive on Freelancer
+    const offer = Math.round(mid * 0.9)
+    suggestedOffer = `${sym}${offer}`
+  } else if (job.rate_min != null && job.rate_max != null) {
+    const offer = Math.round((job.rate_min + job.rate_max) / 2)
+    suggestedOffer = `${sym}${offer}`
+  } else if (job.rate_min != null) {
+    suggestedOffer = `${sym}${job.rate_min}`
+  }
+
+  const budgetLabel = job.budget || null
+  const parts: string[] = []
+  if (suggestedOffer) parts.push(`offer ~${suggestedOffer}`)
+  if (estimatedDays) parts.push(`~${estimatedDays}`)
+  if (budgetLabel) parts.push(`client ${budgetLabel}`)
+
+  return {
+    budgetLabel,
+    suggestedOffer,
+    estimatedDays,
+    effortLabel,
+    score: job.priority_score ?? null,
+    summary: parts.length ? parts.join(' · ') : 'No budget in listing — estimate from scope',
+  }
+}

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 
-// Callers: App.tsx. API: GET/PATCH /api/forum/questions, POST /api/forum/refresh, GET /api/forum/stats.
+// Callers: App.tsx. API: GET/PATCH /api/forum/questions, POST /api/forum/questions/{id}/generate,
+// POST /api/forum/refresh, GET /api/forum/stats.
 // Schema: forum_questions (source, source_id, title, description, url, comments_count, ai_answer, status, ...)
 
 interface ForumQuestion {
@@ -30,13 +31,22 @@ type ForumStatus = 'new' | 'answered' | 'archived'
 const STATUS_TABS: { key: ForumStatus; label: string }[] = [
   { key: 'new', label: 'New' },
   { key: 'answered', label: 'Answered' },
-  { key: 'archived', label: 'Archived' },
+  { key: 'archived', label: 'Skipped' },
 ]
 
 const EMPTY_COPY: Record<ForumStatus, string> = {
   new: 'No new forum questions. Questions are checked every 30 minutes.',
   answered: 'No answered questions yet. Mark questions as answered when you respond on the forum.',
-  archived: 'No archived questions.',
+  archived: 'No skipped questions.',
+}
+
+const SOURCE_META: Record<string, { label: string; short: string; title: string }> = {
+  squarespace_forum: { label: 'SS', short: 'SS', title: 'Squarespace Forum' },
+  stackoverflow: { label: 'SO', short: 'SO', title: 'Stack Overflow' },
+}
+
+function sourceMeta(source: string) {
+  return SOURCE_META[source] || { label: source.slice(0, 2).toUpperCase(), short: source.slice(0, 2).toUpperCase(), title: source }
 }
 
 function formatRelativeTime(iso: string | null): string {
@@ -69,6 +79,7 @@ export default function Forum() {
   const [searchQuery, setSearchQuery] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [generatingId, setGeneratingId] = useState<number | null>(null)
 
   const fetchQuestions = useCallback(async () => {
     setLoading(true)
@@ -109,13 +120,8 @@ export default function Forum() {
   const handleRefresh = async () => {
     setRefreshing(true)
     try {
-      // Start the background refresh
       await fetch('/api/forum/refresh', { method: 'POST' })
-
-      // Wait for AI generation to complete (takes a few seconds)
-      await new Promise(resolve => setTimeout(resolve, 5000))
-
-      // Then refresh the data
+      await new Promise(resolve => setTimeout(resolve, 2000))
       await fetchQuestions()
       await fetchStats()
     } catch (e) {
@@ -149,8 +155,35 @@ export default function Forum() {
     })
   }
 
-  const handleArchive = async (id: number) => {
+  const handleSkip = async (id: number) => {
     await handleStatusUpdate(id, { status: 'archived' })
+  }
+
+  const handleGenerate = async (id: number) => {
+    setGeneratingId(id)
+    setError(null)
+    try {
+      const res = await fetch(`/api/forum/questions/${id}/generate`, { method: 'POST' })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        setError(body.detail || `AI generation failed: ${res.status}`)
+        return
+      }
+      const data = await res.json()
+      setQuestions(prev =>
+        prev.map(q =>
+          q.id === id
+            ? { ...q, ai_answer: data.ai_answer, answer_generated_at: data.answer_generated_at }
+            : q
+        )
+      )
+      setExpandedId(id)
+    } catch (e) {
+      console.error('AI generation failed:', e)
+      setError('Failed to generate AI answer')
+    } finally {
+      setGeneratingId(null)
+    }
   }
 
   const filteredQuestions = questions.filter(q => {
@@ -169,7 +202,7 @@ export default function Forum() {
     <div className="forum-section">
       <div className="section-divider">
         <h3 className="section-title">Forum Monitor</h3>
-        <p className="section-description">Unanswered Squarespace CSS/JS questions with AI answer suggestions</p>
+        <p className="section-description">Unanswered Squarespace CSS/JS questions — generate a draft reply when you want to answer</p>
       </div>
 
       <header className="section-header">
@@ -232,75 +265,102 @@ export default function Forum() {
           <table className="forum-table">
             <thead>
               <tr>
-                <th onClick={() => {/* TODO: Add sorting */}} className="sortable">
-                  Title {'▲'}
-                </th>
-                <th>AI Answer</th>
-                <th>Source</th>
-                <th>Comments</th>
+                <th>Title</th>
+                <th>AI</th>
+                <th className="source-col">Src</th>
                 <th>Time</th>
-                <th>Actions</th>
+                <th className="actions-col">Actions</th>
               </tr>
             </thead>
             <tbody>
-              {filteredQuestions.map(question => (
-                <tr
-                  key={question.id}
-                  className={expandedId === question.id ? 'focused' : ''}
-                  onClick={() => setExpandedId(expandedId === question.id ? null : question.id)}
-                >
-                  <td className="title-cell">
-                    <div className="forum-title">{question.title}</div>
-                    {expandedId === question.id && (
-                      <div className="forum-description">
-                        <p>{question.description}</p>
-                        {question.ai_answer && (
-                          <div className="ai-answer-box">
-                            <strong>AI Answer:</strong>
-                            <p>{question.ai_answer}</p>
-                          </div>
+              {filteredQuestions.map(question => {
+                const meta = sourceMeta(question.source)
+                const generating = generatingId === question.id
+                return (
+                  <tr
+                    key={question.id}
+                    className={expandedId === question.id ? 'focused' : ''}
+                    onClick={() => setExpandedId(expandedId === question.id ? null : question.id)}
+                  >
+                    <td className="title-cell">
+                      <div className="forum-title">{question.title}</div>
+                      {expandedId === question.id && (
+                        <div className="forum-description">
+                          <p>{question.description}</p>
+                          {question.ai_answer && (
+                            <div className="ai-answer-box">
+                              <strong>Draft reply</strong>
+                              <p>{question.ai_answer}</p>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </td>
+                    <td>
+                      {question.ai_answer ? (
+                        <span className="ai-badge" title="Draft ready">✓</span>
+                      ) : (
+                        <span className="no-ai-badge">—</span>
+                      )}
+                    </td>
+                    <td className="source-col">
+                      <span
+                        className={`source-icon source-icon--${question.source}`}
+                        title={meta.title}
+                        aria-label={meta.title}
+                      >
+                        {meta.short}
+                      </span>
+                    </td>
+                    <td>{formatRelativeTime(question.created_at)}</td>
+                    <td className="row-actions actions-cell" onClick={(e) => e.stopPropagation()}>
+                      <div className="triage-group">
+                        <a href={question.url} target="_blank" rel="noopener noreferrer" className="view-link">
+                          Open
+                        </a>
+                        {question.status === 'new' && (
+                          <>
+                            <button
+                              type="button"
+                              className="triage-button triage-primary"
+                              disabled={generating}
+                              onClick={() => handleGenerate(question.id)}
+                            >
+                              {generating ? 'Generating…' : question.ai_answer ? 'Regenerate' : 'Generate AI'}
+                            </button>
+                            <button
+                              type="button"
+                              className="triage-button triage-secondary"
+                              onClick={() => {
+                                const answerUrl = prompt('Enter your forum answer URL:')
+                                if (answerUrl) handleMarkAnswered(question.id, answerUrl)
+                              }}
+                            >
+                              Answered
+                            </button>
+                            <button
+                              type="button"
+                              className="triage-button triage-ghost"
+                              onClick={() => handleSkip(question.id)}
+                            >
+                              Skip
+                            </button>
+                          </>
+                        )}
+                        {question.status === 'archived' && (
+                          <button
+                            type="button"
+                            className="triage-button triage-ghost"
+                            onClick={() => handleStatusUpdate(question.id, { status: 'new' })}
+                          >
+                            Restore
+                          </button>
                         )}
                       </div>
-                    )}
-                  </td>
-                  <td>
-                    {question.ai_answer ? (
-                      <span className="ai-badge">✓ AI</span>
-                    ) : (
-                      <span className="no-ai-badge">—</span>
-                    )}
-                  </td>
-                  <td>
-                    <span className="source-badge">{question.source}</span>
-                  </td>
-                  <td>{question.comments_count}</td>
-                  <td>{formatRelativeTime(question.created_at)}</td>
-                  <td className="row-actions" onClick={(e) => e.stopPropagation()}>
-                    <a href={question.url} target="_blank" rel="noopener noreferrer" className="view-link">
-                      Open
-                    </a>
-                    {question.status === 'new' && (
-                      <>
-                        <button
-                          className="triage-button triage-secondary"
-                          onClick={() => {
-                            const answerUrl = prompt('Enter your forum answer URL:')
-                            if (answerUrl) handleMarkAnswered(question.id, answerUrl)
-                          }}
-                        >
-                          Answered
-                        </button>
-                        <button
-                          className="triage-button triage-ghost"
-                          onClick={() => handleArchive(question.id)}
-                        >
-                          Archive
-                        </button>
-                      </>
-                    )}
-                  </td>
-                </tr>
-              ))}
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </div>
