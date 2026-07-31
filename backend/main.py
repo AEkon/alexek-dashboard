@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 import asyncio
 import sqlite3
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import quote
 from dotenv import load_dotenv
