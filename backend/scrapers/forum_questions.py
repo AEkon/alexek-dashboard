@@ -244,7 +244,6 @@ async def scrape_squarespace_rss(db, client: httpx.AsyncClient, cutoff_time: dat
 
             # Parse the published date
             try:
-                from datetime import timezone
                 if isinstance(published, str):
                     # Try parsing ISO format
                     try:
@@ -258,10 +257,17 @@ async def scrape_squarespace_rss(db, client: httpx.AsyncClient, cutoff_time: dat
                 # Ensure published_dt is timezone-aware for comparison
                 if published_dt.tzinfo is None:
                     published_dt = published_dt.replace(tzinfo=timezone.utc)
+                # Convert both to UTC for consistent comparison
+                elif published_dt.tzinfo != timezone.utc:
+                    published_dt = published_dt.astimezone(timezone.utc)
 
             except Exception as e:
                 print(f"Error parsing date {published}: {e}")
                 continue
+
+            # Ensure cutoff_time is timezone-aware for comparison
+            if cutoff_time.tzinfo is None:
+                cutoff_time = cutoff_time.replace(tzinfo=timezone.utc)
 
             # Check if this is newer than our cutoff time
             if published_dt < cutoff_time:
@@ -509,6 +515,43 @@ async def notify_new_forum_questions(questions: List[Dict]) -> Optional[str]:
     except Exception as e:
         return str(e)
 
+async def backfill_ai_answers(db) -> int:
+    """Generate AI answers for existing questions that don't have them."""
+    questions_without_ai = db.execute(
+        "SELECT id, source, source_id, title, description, url FROM forum_questions WHERE ai_answer IS NULL LIMIT 20"
+    ).fetchall()
+
+    if not questions_without_ai:
+        print("✓ No existing questions need AI answers")
+        return 0
+
+    print(f"🔄 Backfilling AI answers for {len(questions_without_ai)} existing questions...")
+
+    backfilled_count = 0
+    for question in questions_without_ai:
+        question_data = {
+            "source": question["source"],
+            "source_id": question["source_id"],
+            "title": question["title"],
+            "description": question["description"],
+            "url": question["url"]
+        }
+
+        print(f"🤖 Generating AI answer for: {question['title'][:30]}...")
+        ai_answer = generate_ai_answer(question_data)
+        if ai_answer:
+            db.execute(
+                "UPDATE forum_questions SET ai_answer = ?, answer_generated_at = ? WHERE id = ?",
+                (ai_answer, datetime.now(timezone.utc).isoformat(), question["id"])
+            )
+            backfilled_count += 1
+            print(f"✓ AI answer generated for: {question['title'][:30]}")
+        else:
+            print(f"✗ No AI answer generated for: {question['title'][:30]}")
+
+    db.commit()
+    return backfilled_count
+
 async def scrape(db) -> Dict[str, object]:
     """Main entry point - scrape all configured forum sources."""
     if is_scraper_running(db, "forum_questions"):
@@ -531,6 +574,7 @@ async def scrape(db) -> Dict[str, object]:
         "stackoverflow": 0,
         "total_questions": 0,
         "new_questions": 0,
+        "ai_backfilled": 0,
         "status": "running",
         "errors": []
     }
@@ -564,6 +608,17 @@ async def scrape(db) -> Dict[str, object]:
                 print(error_msg)
 
         db.commit()
+
+        # Backfill AI answers for existing questions (even if scraping failed)
+        try:
+            backfilled_count = await backfill_ai_answers(db)
+            results["ai_backfilled"] = backfilled_count
+            if backfilled_count > 0:
+                print(f"✓ Backfilled AI answers for {backfilled_count} existing questions")
+        except Exception as backfill_error:
+            error_msg = f"AI backfill failed: {str(backfill_error)}"
+            results["errors"].append(error_msg)
+            print(error_msg)
 
         # Send WhatsApp alerts for new forum questions
         if all_new_questions:
