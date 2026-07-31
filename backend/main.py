@@ -650,6 +650,9 @@ async def get_forum_stats():
         GROUP BY status
     """).fetchall()
 
+    # Get total count for debugging
+    total_count = db.execute("SELECT COUNT(*) FROM forum_questions").fetchone()
+
     # Get counts by source
     source_counts = db.execute("""
         SELECT source, COUNT(*) as count
@@ -658,10 +661,14 @@ async def get_forum_stats():
         GROUP BY source
     """).fetchall()
 
-    return {
+    stats = {
         "by_status": {row["status"]: row["count"] for row in status_counts},
         "by_source": {row["source"]: row["count"] for row in source_counts},
+        "_debug": {"total_questions": total_count[0]}
     }
+
+    print(f"📊 Forum stats: {stats}")
+    return stats
 
 @app.get("/api/scrape-log")
 async def get_scrape_log():

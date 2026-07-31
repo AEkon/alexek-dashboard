@@ -285,12 +285,16 @@ async def scrape_squarespace_rss(db, client: httpx.AsyncClient, cutoff_time: dat
 
             needs_ai_answer = False
             if existing:
+                print(f"📋 Found existing question: {title[:30]}... (has AI: {existing['ai_answer'] is not None})")
                 # If existing post has no AI answer, flag it for generation
                 if existing["ai_answer"] is None:
                     needs_ai_answer = True
+                    print(f"🔄 Needs AI answer generation")
                 else:
                     rows += 1
                     continue
+            else:
+                print(f"🆕 New question: {title[:30]}...")
 
             # Build question data
             question_data = {
@@ -305,16 +309,20 @@ async def scrape_squarespace_rss(db, client: httpx.AsyncClient, cutoff_time: dat
 
             # Generate AI answer for new posts or existing posts without AI answers
             if not existing or needs_ai_answer:
-                print(f"Generating AI answer for: {title[:50]}...")
+                print(f"🤖 Triggering AI answer generation for: {title[:50]}...")
                 ai_answer = generate_ai_answer(question_data)
                 if ai_answer:
                     question_data["ai_answer"] = ai_answer
-                    question_data["answer_generated_at"] = datetime.utcnow().isoformat()
+                    question_data["answer_generated_at"] = datetime.now(timezone.utc).isoformat()
                     print(f"✓ AI answer generated for: {title[:30]}")
                 else:
                     print(f"✗ No AI answer generated for: {title[:30]}")
+            else:
+                print(f"⏭️ Skipping AI generation (already has answer)")
 
             status = await upsert_question(db, question_data)
+            print(f"📝 Database status: {status}")
+
             if status == "inserted":
                 new_questions += 1
                 new_questions_for_alert.append({
@@ -512,6 +520,12 @@ async def scrape(db) -> Dict[str, object]:
     cutoff_time = get_time_filter(db)
     print(f"🕐 Using time filter: since {cutoff_time.isoformat()}")
 
+    # Check existing questions without AI answers
+    existing_no_ai = db.execute(
+        "SELECT COUNT(*) FROM forum_questions WHERE ai_answer IS NULL"
+    ).fetchone()
+    print(f"📊 Existing questions without AI answers: {existing_no_ai[0]}")
+
     results = {
         "squarespace_forum": 0,
         "stackoverflow": 0,
@@ -570,6 +584,9 @@ async def scrape(db) -> Dict[str, object]:
             purge_forum_questions(db)
         except Exception as cleanup_error:
             print(f"Cleanup error: {cleanup_error}")
+
+        # Log final results
+        print(f"📊 Final results: {results}")
 
         # Determine overall status
         if results["total_questions"] > 0:
