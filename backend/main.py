@@ -7,6 +7,7 @@ import os
 from datetime import datetime, timedelta
 from typing import Optional
 from urllib.parse import quote
+from dotenv import load_dotenv
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -23,6 +24,9 @@ from auth import (
 )
 
 app = FastAPI(title="Personal Dashboard API")
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Mount static files for frontend.
 # Vite emits /assets/*; also expose /static for the same build output.
