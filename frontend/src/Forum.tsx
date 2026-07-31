@@ -109,7 +109,13 @@ export default function Forum() {
   const handleRefresh = async () => {
     setRefreshing(true)
     try {
+      // Start the background refresh
       await fetch('/api/forum/refresh', { method: 'POST' })
+
+      // Wait for AI generation to complete (takes a few seconds)
+      await new Promise(resolve => setTimeout(resolve, 5000))
+
+      // Then refresh the data
       await fetchQuestions()
       await fetchStats()
     } catch (e) {
