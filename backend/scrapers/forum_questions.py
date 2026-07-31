@@ -157,7 +157,7 @@ async def upsert_question(db, question_data: Dict) -> str:
     source = question_data.get("source", "unknown")
     source_id = question_data.get("source_id", "")
 
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
 
     # Check if exists and get AI answer status
     existing = db.execute(
@@ -240,7 +240,7 @@ async def scrape_squarespace_rss(db, client: httpx.AsyncClient, cutoff_time: dat
             title = clean_html(entry.get("title", ""))
             description = clean_html(entry.get("summary") or entry.get("description", ""))
             link = entry.get("link", "")
-            published = entry.get("published") or entry.get("updated") or datetime.utcnow().isoformat()
+            published = entry.get("published") or entry.get("updated") or datetime.now(timezone.utc).isoformat()
 
             # Parse the published date
             try:
@@ -269,7 +269,13 @@ async def scrape_squarespace_rss(db, client: httpx.AsyncClient, cutoff_time: dat
             if cutoff_time.tzinfo is None:
                 cutoff_time = cutoff_time.replace(tzinfo=timezone.utc)
 
-            # Check if this is newer than our cutoff time
+            # 24-hour retention policy: skip if older than 24 hours
+            twenty_four_hours_ago = datetime.now(timezone.utc) - timedelta(hours=24)
+            if published_dt < twenty_four_hours_ago:
+                print(f"⏭️ Skipping question older than 24h: {title[:30]}...")
+                continue
+
+            # Check if this is newer than our cutoff time (for incremental scraping)
             if published_dt < cutoff_time:
                 continue
 
@@ -310,7 +316,7 @@ async def scrape_squarespace_rss(db, client: httpx.AsyncClient, cutoff_time: dat
                 "description": description[:1000],  # Limit description length
                 "url": link,
                 "comments_count": 0,  # Don't track comment counts for RSS
-                "created_at": published_dt.isoformat() if published_dt else datetime.utcnow().isoformat()
+                "created_at": published_dt.isoformat() if published_dt else datetime.now(timezone.utc).isoformat()
             }
 
             # Generate AI answer for new posts or existing posts without AI answers
@@ -400,6 +406,14 @@ async def scrape_stackoverflow(db, client: httpx.AsyncClient, cutoff_time: datet
                     if not is_forum_question(title, description):
                         continue
 
+                    # 24-hour retention policy: skip if older than 24 hours
+                    if creation_date:
+                        created_dt = datetime.fromtimestamp(creation_date, tz=timezone.utc)
+                        twenty_four_hours_ago = datetime.now(timezone.utc) - timedelta(hours=24)
+                        if created_dt < twenty_four_hours_ago:
+                            print(f"⏭️ Skipping Stack Overflow question older than 24h: {title[:30]}...")
+                            continue
+
                     source_id = str(question_id)
 
                     # Check if already exists and get AI answer status
@@ -434,7 +448,7 @@ async def scrape_stackoverflow(db, client: httpx.AsyncClient, cutoff_time: datet
                         ai_answer = generate_ai_answer(question_data)
                         if ai_answer:
                             question_data["ai_answer"] = ai_answer
-                            question_data["answer_generated_at"] = datetime.utcnow().isoformat()
+                            question_data["answer_generated_at"] = datetime.now(timezone.utc).isoformat()
                             print(f"✓ AI answer generated for: {title[:30]}")
                         else:
                             print(f"✗ No AI answer generated for: {title[:30]}")
@@ -666,33 +680,14 @@ async def scrape(db) -> Dict[str, object]:
     return results
 
 def purge_forum_questions(conn) -> None:
-    """Clean up old forum questions based on retention rules."""
-    # Get retention settings from environment variables
-    new_days = int(os.getenv("FORUM_RETENTION_NEW_DAYS", "30"))      # Keep 'new' questions for 30 days
-    answered_days = int(os.getenv("FORUM_RETENTION_ANSWERED_DAYS", "90"))  # Keep 'answered' for 90 days
-    archived_days = int(os.getenv("FORUM_RETENTION_ARCHIVED_DAYS", "7"))   # Keep 'archived' for 7 days
+    """Clean up forum questions older than 24 hours."""
+    # Delete all questions older than 24 hours regardless of status
+    twenty_four_hours_ago = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
 
-    cutoff_new = (datetime.utcnow() - timedelta(days=new_days)).isoformat()
-    cutoff_answered = (datetime.utcnow() - timedelta(days=answered_days)).isoformat()
-    cutoff_archived = (datetime.utcnow() - timedelta(days=archived_days)).isoformat()
-
-    # Delete old new questions
-    conn.execute(
-        "DELETE FROM forum_questions WHERE status = 'new' AND created_at < ?",
-        (cutoff_new,),
-    )
-
-    # Delete old answered questions
-    conn.execute(
-        "DELETE FROM forum_questions WHERE status = 'answered' AND COALESCE(answered_at, created_at) < ?",
-        (cutoff_answered,),
-    )
-
-    # Delete old archived questions
-    conn.execute(
-        "DELETE FROM forum_questions WHERE status = 'archived' AND COALESCE(updated_at, created_at) < ?",
-        (cutoff_archived,),
-    )
+    deleted_count = conn.execute(
+        "DELETE FROM forum_questions WHERE created_at < ?",
+        (twenty_four_hours_ago,)
+    ).rowcount
 
     conn.commit()
-    print(f"Forum cleanup completed: new<{new_days}d, answered<{answered_days}d, archived<{archived_days}d")
+    print(f"Forum cleanup completed: deleted {deleted_count} questions older than 24 hours")
