@@ -44,33 +44,75 @@ body {
   margin-bottom: 1rem;
 }
 
-/* Main navigation */
+/* Main navigation — segmented Jobs / Forum switch */
 .main-nav {
-  display: flex;
-  gap: 0.5rem;
+  display: inline-flex;
+  gap: 0;
+  padding: 0.25rem;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 
 .nav-button {
-  background-color: white;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  background: transparent;
   color: var(--color-text);
-  border: 2px solid var(--color-border);
-  padding: 0.75rem 1.5rem;
-  border-radius: 8px;
+  border: none;
+  padding: 0.55rem 0.95rem;
+  border-radius: 7px;
   cursor: pointer;
-  font-size: 1rem;
+  font-size: 0.95rem;
   font-weight: 600;
-  transition: all 0.2s;
+  transition: background-color 0.15s, color 0.15s;
 }
 
 .nav-button:hover {
-  border-color: var(--color-accent);
-  background-color: rgba(42, 157, 143, 0.05);
+  background: rgba(42, 157, 143, 0.08);
 }
 
 .nav-button.active {
-  background-color: var(--color-primary);
-  border-color: var(--color-primary);
+  background: var(--color-primary);
   color: white;
+}
+
+.nav-button-label {
+  letter-spacing: 0.01em;
+}
+
+.nav-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 3.25rem;
+  padding: 0.15rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  background: rgba(44, 44, 44, 0.08);
+  color: rgba(44, 44, 44, 0.55);
+  line-height: 1.2;
+}
+
+.nav-button.active .nav-badge {
+  background: rgba(255, 255, 255, 0.2);
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.nav-badge--hot {
+  background: rgba(42, 157, 143, 0.18);
+  color: #1f7a70;
+}
+
+.nav-button.active .nav-badge--hot {
+  background: rgba(255, 255, 255, 0.28);
+  color: #fff;
 }
 
 .app-main {
@@ -511,7 +553,9 @@ body {
 
 .actions-col,
 .actions-cell {
-  min-width: 220px;
+  width: 18rem;
+  min-width: 18rem;
+  max-width: 22rem;
 }
 
 .row-actions {
@@ -519,6 +563,68 @@ body {
   flex-direction: column;
   align-items: flex-start;
   gap: 0.55rem;
+}
+
+.inbox-table {
+  table-layout: fixed;
+  width: 100%;
+}
+
+.inbox-table .title-col,
+.inbox-table .title-cell {
+  width: auto;
+}
+
+.inbox-table .ai-col {
+  width: 3.5rem;
+}
+
+.inbox-table .source-col {
+  width: 3.25rem;
+}
+
+.inbox-table .time-col {
+  width: 5.5rem;
+  white-space: nowrap;
+}
+
+.inbox-table .advice-col,
+.inbox-table .advice-cell {
+  width: 11rem;
+}
+
+.inbox-table .actions-cell .triage-group {
+  flex-wrap: wrap;
+  max-width: 22rem;
+}
+
+.detail-row td {
+  background: rgba(250, 240, 230, 0.55);
+  border-bottom: 1px solid var(--color-border);
+  padding: 0 !important;
+}
+
+.row-detail {
+  padding: 0.85rem 1rem 1.1rem;
+}
+
+.row-detail-body {
+  margin: 0 0 0.75rem;
+  font-size: 0.85rem;
+  line-height: 1.45;
+  color: rgba(44, 44, 44, 0.82);
+}
+
+.ai-answer-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.ai-answer-toolbar strong {
+  margin: 0;
 }
 
 .view-link {
@@ -1353,12 +1459,12 @@ a.apply-drawer-open {
   font-weight: 600;
 }
 
-/* Compact horizontal action rows */
+/* Compact horizontal action rows — fixed column prevents expand-squish */
 .forum-section .row-actions,
 .jobs-section .row-actions {
   flex-direction: row;
-  flex-wrap: wrap;
-  align-items: center;
+  flex-wrap: nowrap;
+  align-items: flex-start;
   gap: 0.35rem;
 }
 

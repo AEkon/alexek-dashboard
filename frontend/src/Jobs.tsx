@@ -1,8 +1,7 @@
-import { useState, useEffect, useCallback } from 'react'
+import { Fragment, useState, useEffect, useCallback } from 'react'
 import { buildJobAdvice } from './proposal'
 
 // Callers: App.tsx. API: GET/PATCH /api/jobs, POST /api/jobs/{id}/generate, POST /api/refresh/jobs, GET /api/jobs/stats.
-// Schema: jobs (..., ai_proposal, ai_bid_amount, ai_bid_days, proposal_generated_at, ...)
 
 interface Job {
   id: number
@@ -39,6 +38,10 @@ interface JobStats {
 }
 
 type JobStatus = 'new' | 'interested' | 'applied' | 'skipped' | 'archived' | 'gone' | 'won' | 'lost' | 'no_reply' | 'closed'
+
+type JobsProps = {
+  onInboxChange?: () => void
+}
 
 const STATUS_TABS: { key: JobStatus; label: string }[] = [
   { key: 'new', label: 'New' },
@@ -99,7 +102,7 @@ async function copyText(text: string) {
   }
 }
 
-export default function Jobs() {
+export default function Jobs({ onInboxChange }: JobsProps) {
   const [jobs, setJobs] = useState<Job[]>([])
   const [stats, setStats] = useState<JobStats | null>(null)
   const [activeTab, setActiveTab] = useState<JobStatus>('new')
@@ -109,7 +112,11 @@ export default function Jobs() {
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [generatingId, setGeneratingId] = useState<number | null>(null)
-  const [copiedId, setCopiedId] = useState<number | null>(null)
+  const [copiedKey, setCopiedKey] = useState<string | null>(null)
+
+  const notifyInbox = useCallback(() => {
+    onInboxChange?.()
+  }, [onInboxChange])
 
   const fetchJobs = useCallback(async () => {
     setLoading(true)
@@ -117,8 +124,7 @@ export default function Jobs() {
     try {
       const res = await fetch(`/api/jobs?status=${activeTab}&limit=50`)
       if (res.ok) {
-        const data = await res.json()
-        setJobs(data)
+        setJobs(await res.json())
       } else {
         setError(`Failed to fetch jobs: ${res.status}`)
       }
@@ -134,13 +140,13 @@ export default function Jobs() {
     try {
       const res = await fetch('/api/jobs/stats')
       if (res.ok) {
-        const data = await res.json()
-        setStats(data)
+        setStats(await res.json())
+        notifyInbox()
       }
     } catch (e) {
       console.error('Failed to fetch stats:', e)
     }
-  }, [])
+  }, [notifyInbox])
 
   useEffect(() => {
     fetchJobs()
@@ -221,7 +227,17 @@ export default function Jobs() {
     }
   }
 
-  const handleCopyProposal = async (job: Job) => {
+  const flashCopied = (key: string) => {
+    setCopiedKey(key)
+    window.setTimeout(() => setCopiedKey(prev => (prev === key ? null : prev)), 1500)
+  }
+
+  const handleCopy = async (key: string, text: string) => {
+    await copyText(text)
+    flashCopied(key)
+  }
+
+  const handleCopyPack = async (job: Job) => {
     if (!job.ai_proposal) return
     const pack = [
       job.ai_proposal,
@@ -229,9 +245,7 @@ export default function Jobs() {
       `Bid: ${formatMoney(job.ai_bid_amount, job.currency)}`,
       `Days: ${job.ai_bid_days ?? '—'}`,
     ].join('\n')
-    await copyText(pack)
-    setCopiedId(job.id)
-    window.setTimeout(() => setCopiedId(prev => (prev === job.id ? null : prev)), 1500)
+    await handleCopy(`pack-${job.id}`, pack)
   }
 
   const filteredJobs = jobs.filter(job =>
@@ -260,6 +274,19 @@ export default function Jobs() {
     )
   }
 
+  const copyButtons = (job: Job) => {
+    if (!job.ai_proposal) return null
+    return (
+      <button
+        type="button"
+        className="triage-button triage-secondary"
+        onClick={() => handleCopyPack(job)}
+      >
+        {copiedKey === `pack-${job.id}` ? 'Copied' : 'Copy AI'}
+      </button>
+    )
+  }
+
   const renderActions = (job: Job) => {
     const open = (
       <a href={job.url} target="_blank" rel="noopener noreferrer" className="view-link">
@@ -272,6 +299,7 @@ export default function Jobs() {
         <div className="triage-group">
           {open}
           {generateButton(job)}
+          {copyButtons(job)}
           <button
             type="button"
             className="triage-button triage-secondary"
@@ -291,6 +319,7 @@ export default function Jobs() {
         <div className="triage-group">
           {open}
           {generateButton(job)}
+          {copyButtons(job)}
           <button
             type="button"
             className="triage-button triage-secondary"
@@ -317,6 +346,7 @@ export default function Jobs() {
         <div className="triage-group">
           {open}
           {generateButton(job)}
+          {copyButtons(job)}
           <button type="button" className="triage-button triage-primary" onClick={() => handleWon(job.id)}>
             Won
           </button>
@@ -352,6 +382,7 @@ export default function Jobs() {
       return (
         <div className="triage-group">
           {open}
+          {copyButtons(job)}
           <button
             type="button"
             className="triage-button triage-secondary"
@@ -366,6 +397,8 @@ export default function Jobs() {
     return <div className="triage-group">{open}</div>
   }
 
+  const colCount = 5
+
   return (
     <div className="jobs-section">
       <div className="section-divider">
@@ -377,11 +410,7 @@ export default function Jobs() {
 
       <header className="section-header">
         <h2>Jobs Board</h2>
-        <button
-          className="refresh-button"
-          onClick={handleRefresh}
-          disabled={refreshing}
-        >
+        <button className="refresh-button" onClick={handleRefresh} disabled={refreshing}>
           {refreshing ? '↻' : '⟳'} Refresh
         </button>
       </header>
@@ -418,11 +447,7 @@ export default function Jobs() {
         />
       </div>
 
-      {error && (
-        <div className="error-message">
-          {error}
-        </div>
-      )}
+      {error && <div className="error-message">{error}</div>}
 
       {loading ? (
         <div className="loading">Loading jobs...</div>
@@ -432,13 +457,13 @@ export default function Jobs() {
         </div>
       ) : (
         <div className="jobs-table-container">
-          <table className="jobs-table">
+          <table className="jobs-table inbox-table">
             <thead>
               <tr>
-                <th>Title</th>
+                <th className="title-col">Title</th>
                 <th className="source-col">Src</th>
-                <th>Bid pack</th>
-                <th>Posted</th>
+                <th className="advice-col">Bid pack</th>
+                <th className="time-col">Posted</th>
                 <th className="actions-col">Actions</th>
               </tr>
             </thead>
@@ -447,84 +472,119 @@ export default function Jobs() {
                 const advice = buildJobAdvice(job)
                 const meta = sourceMeta(job.source)
                 const hasPack = Boolean(job.ai_proposal)
+                const expanded = expandedId === job.id
                 return (
-                  <tr
-                    key={job.id}
-                    className={expandedId === job.id ? 'focused' : ''}
-                    onClick={() => setExpandedId(expandedId === job.id ? null : job.id)}
-                  >
-                    <td className="title-cell">
-                      <div className="job-title">{job.title}</div>
-                      {expandedId === job.id && (
-                        <div className="job-description">
-                          <p>{job.description}</p>
-                          {hasPack ? (
-                            <div className="job-proposal-box">
-                              <div className="job-proposal-meta">
-                                <span>
-                                  <strong>Bid</strong> {formatMoney(job.ai_bid_amount, job.currency)}
-                                </span>
-                                <span>
-                                  <strong>Days</strong> {job.ai_bid_days}
-                                </span>
-                                <button
-                                  type="button"
-                                  className="triage-button triage-ghost"
-                                  onClick={(e) => {
-                                    e.stopPropagation()
-                                    handleCopyProposal(job)
-                                  }}
-                                >
-                                  {copiedId === job.id ? 'Copied' : 'Copy pack'}
-                                </button>
+                  <Fragment key={job.id}>
+                    <tr
+                      className={expanded ? 'focused' : ''}
+                      onClick={() => setExpandedId(expanded ? null : job.id)}
+                    >
+                      <td className="title-cell">
+                        <div className="job-title">{job.title}</div>
+                      </td>
+                      <td className="source-col">
+                        <span
+                          className={`source-icon source-icon--${(job.source || '').toLowerCase()}`}
+                          title={meta.title}
+                          aria-label={meta.title}
+                        >
+                          {meta.short}
+                        </span>
+                      </td>
+                      <td className="advice-cell">
+                        {hasPack ? (
+                          <>
+                            <div className="advice-summary">
+                              {formatMoney(job.ai_bid_amount, job.currency)} · {job.ai_bid_days}d
+                            </div>
+                            <div className="advice-score">AI ready</div>
+                          </>
+                        ) : (
+                          <>
+                            <div className="advice-summary">{advice.summary}</div>
+                            {advice.score != null && (
+                              <div className="advice-score">score {Math.round(advice.score)}</div>
+                            )}
+                          </>
+                        )}
+                      </td>
+                      <td className="time-col">{formatRelativeTime(job.posted_date)}</td>
+                      <td className="row-actions actions-cell" onClick={(e) => e.stopPropagation()}>
+                        {renderActions(job)}
+                      </td>
+                    </tr>
+                    {expanded && (
+                      <tr className="detail-row">
+                        <td colSpan={colCount}>
+                          <div className="row-detail">
+                            <p className="row-detail-body">{job.description}</p>
+                            {hasPack ? (
+                              <div className="job-proposal-box">
+                                <div className="job-proposal-meta">
+                                  <span>
+                                    <strong>Bid</strong> {formatMoney(job.ai_bid_amount, job.currency)}
+                                  </span>
+                                  <span>
+                                    <strong>Days</strong> {job.ai_bid_days}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    className="triage-button triage-secondary"
+                                    onClick={() =>
+                                      handleCopy(
+                                        `bid-${job.id}`,
+                                        String(job.ai_bid_amount ?? '')
+                                      )
+                                    }
+                                  >
+                                    {copiedKey === `bid-${job.id}` ? 'Copied' : 'Copy bid'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="triage-button triage-secondary"
+                                    onClick={() =>
+                                      handleCopy(`days-${job.id}`, String(job.ai_bid_days ?? ''))
+                                    }
+                                  >
+                                    {copiedKey === `days-${job.id}` ? 'Copied' : 'Copy days'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="triage-button triage-secondary"
+                                    onClick={() =>
+                                      handleCopy(`proposal-${job.id}`, job.ai_proposal || '')
+                                    }
+                                  >
+                                    {copiedKey === `proposal-${job.id}` ? 'Copied' : 'Copy proposal'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="triage-button triage-primary"
+                                    onClick={() => handleCopyPack(job)}
+                                  >
+                                    {copiedKey === `pack-${job.id}` ? 'Copied' : 'Copy all'}
+                                  </button>
+                                </div>
+                                <strong className="job-proposal-label">Proposal</strong>
+                                <p className="job-proposal-text">{job.ai_proposal}</p>
                               </div>
-                              <strong className="job-proposal-label">Proposal</strong>
-                              <p className="job-proposal-text">{job.ai_proposal}</p>
-                            </div>
-                          ) : (
-                            <div className="job-advice-box">
-                              <strong>Quick heuristic</strong>
-                              <p>{advice.summary}</p>
-                              <p className="advice-hint">Click Generate AI for a Freelancer-ready proposal, bid, and days.</p>
-                            </div>
-                          )}
-                          {job.earnings_usd != null && (
-                            <p className="job-earnings">Won: ${job.earnings_usd}</p>
-                          )}
-                        </div>
-                      )}
-                    </td>
-                    <td className="source-col">
-                      <span
-                        className={`source-icon source-icon--${(job.source || '').toLowerCase()}`}
-                        title={meta.title}
-                        aria-label={meta.title}
-                      >
-                        {meta.short}
-                      </span>
-                    </td>
-                    <td className="advice-cell">
-                      {hasPack ? (
-                        <>
-                          <div className="advice-summary">
-                            {formatMoney(job.ai_bid_amount, job.currency)} · {job.ai_bid_days}d
+                            ) : (
+                              <div className="job-advice-box">
+                                <strong>Quick heuristic</strong>
+                                <p>{advice.summary}</p>
+                                <p className="advice-hint">
+                                  Click Generate AI for a Freelancer-ready proposal, bid, and days.
+                                </p>
+                              </div>
+                            )}
+                            {job.earnings_usd != null && (
+                              <p className="job-earnings">Won: ${job.earnings_usd}</p>
+                            )}
                           </div>
-                          <div className="advice-score">AI ready</div>
-                        </>
-                      ) : (
-                        <>
-                          <div className="advice-summary">{advice.summary}</div>
-                          {advice.score != null && (
-                            <div className="advice-score">score {Math.round(advice.score)}</div>
-                          )}
-                        </>
-                      )}
-                    </td>
-                    <td>{formatRelativeTime(job.posted_date)}</td>
-                    <td className="row-actions actions-cell" onClick={(e) => e.stopPropagation()}>
-                      {renderActions(job)}
-                    </td>
-                  </tr>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 )
               })}
             </tbody>

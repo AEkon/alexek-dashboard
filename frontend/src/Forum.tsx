@@ -1,8 +1,7 @@
-import { useState, useEffect, useCallback } from 'react'
+import { Fragment, useState, useEffect, useCallback } from 'react'
 
 // Callers: App.tsx. API: GET/PATCH /api/forum/questions, POST /api/forum/questions/{id}/generate,
 // POST /api/forum/refresh, GET /api/forum/stats.
-// Schema: forum_questions (source, source_id, title, description, url, comments_count, ai_answer, status, ...)
 
 interface ForumQuestion {
   id: number
@@ -27,6 +26,10 @@ interface ForumStats {
 }
 
 type ForumStatus = 'new' | 'answered' | 'archived'
+
+type ForumProps = {
+  onInboxChange?: () => void
+}
 
 const STATUS_TABS: { key: ForumStatus; label: string }[] = [
   { key: 'new', label: 'New' },
@@ -66,11 +69,18 @@ function isLastDay(iso: string | null): boolean {
   if (!iso) return false
   const then = new Date(iso).getTime()
   const now = Date.now()
-  const oneDayMs = 24 * 60 * 60 * 1000
-  return (now - then) < oneDayMs
+  return (now - then) < 24 * 60 * 60 * 1000
 }
 
-export default function Forum() {
+async function copyText(text: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {
+    // ignore
+  }
+}
+
+export default function Forum({ onInboxChange }: ForumProps) {
   const [questions, setQuestions] = useState<ForumQuestion[]>([])
   const [stats, setStats] = useState<ForumStats | null>(null)
   const [activeTab, setActiveTab] = useState<ForumStatus>('new')
@@ -80,6 +90,11 @@ export default function Forum() {
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [generatingId, setGeneratingId] = useState<number | null>(null)
+  const [copiedKey, setCopiedKey] = useState<string | null>(null)
+
+  const notifyInbox = useCallback(() => {
+    onInboxChange?.()
+  }, [onInboxChange])
 
   const fetchQuestions = useCallback(async () => {
     setLoading(true)
@@ -87,8 +102,7 @@ export default function Forum() {
     try {
       const res = await fetch(`/api/forum/questions?status=${activeTab}&limit=50`)
       if (res.ok) {
-        const data = await res.json()
-        setQuestions(data)
+        setQuestions(await res.json())
       } else {
         setError(`Failed to fetch questions: ${res.status}`)
       }
@@ -104,13 +118,13 @@ export default function Forum() {
     try {
       const res = await fetch('/api/forum/stats')
       if (res.ok) {
-        const data = await res.json()
-        setStats(data)
+        setStats(await res.json())
+        notifyInbox()
       }
     } catch (e) {
       console.error('Failed to fetch stats:', e)
     }
-  }, [])
+  }, [notifyInbox])
 
   useEffect(() => {
     fetchQuestions()
@@ -186,17 +200,26 @@ export default function Forum() {
     }
   }
 
+  const flashCopied = (key: string) => {
+    setCopiedKey(key)
+    window.setTimeout(() => setCopiedKey(prev => (prev === key ? null : prev)), 1500)
+  }
+
+  const handleCopyAnswer = async (question: ForumQuestion) => {
+    if (!question.ai_answer) return
+    await copyText(question.ai_answer)
+    flashCopied(`answer-${question.id}`)
+  }
+
   const filteredQuestions = questions.filter(q => {
     const matchesSearch = searchQuery === '' ||
       q.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
       q.description.toLowerCase().includes(searchQuery.toLowerCase())
-
-    const isRecent = isLastDay(q.created_at)
-
-    return matchesSearch && isRecent
+    return matchesSearch && isLastDay(q.created_at)
   })
 
   const tabCount = (key: ForumStatus) => stats?.by_status[key] || 0
+  const colCount = 5
 
   return (
     <div className="forum-section">
@@ -207,11 +230,7 @@ export default function Forum() {
 
       <header className="section-header">
         <h2>Forum Questions</h2>
-        <button
-          className="refresh-button"
-          onClick={handleRefresh}
-          disabled={refreshing}
-        >
+        <button className="refresh-button" onClick={handleRefresh} disabled={refreshing}>
           {refreshing ? '↻' : '⟳'} Refresh
         </button>
       </header>
@@ -248,11 +267,7 @@ export default function Forum() {
         />
       </div>
 
-      {error && (
-        <div className="error-message">
-          {error}
-        </div>
-      )}
+      {error && <div className="error-message">{error}</div>}
 
       {loading ? (
         <div className="loading">Loading forum questions...</div>
@@ -262,13 +277,13 @@ export default function Forum() {
         </div>
       ) : (
         <div className="forum-table-container">
-          <table className="forum-table">
+          <table className="forum-table inbox-table">
             <thead>
               <tr>
-                <th>Title</th>
-                <th>AI</th>
+                <th className="title-col">Title</th>
+                <th className="ai-col">AI</th>
                 <th className="source-col">Src</th>
-                <th>Time</th>
+                <th className="time-col">Time</th>
                 <th className="actions-col">Actions</th>
               </tr>
             </thead>
@@ -276,89 +291,122 @@ export default function Forum() {
               {filteredQuestions.map(question => {
                 const meta = sourceMeta(question.source)
                 const generating = generatingId === question.id
+                const expanded = expandedId === question.id
                 return (
-                  <tr
-                    key={question.id}
-                    className={expandedId === question.id ? 'focused' : ''}
-                    onClick={() => setExpandedId(expandedId === question.id ? null : question.id)}
-                  >
-                    <td className="title-cell">
-                      <div className="forum-title">{question.title}</div>
-                      {expandedId === question.id && (
-                        <div className="forum-description">
-                          <p>{question.description}</p>
-                          {question.ai_answer && (
-                            <div className="ai-answer-box">
-                              <strong>Draft reply</strong>
-                              <p>{question.ai_answer}</p>
-                            </div>
+                  <Fragment key={question.id}>
+                    <tr
+                      className={expanded ? 'focused' : ''}
+                      onClick={() => setExpandedId(expanded ? null : question.id)}
+                    >
+                      <td className="title-cell">
+                        <div className="forum-title">{question.title}</div>
+                      </td>
+                      <td className="ai-col">
+                        {question.ai_answer ? (
+                          <span className="ai-badge" title="Draft ready">✓</span>
+                        ) : (
+                          <span className="no-ai-badge">—</span>
+                        )}
+                      </td>
+                      <td className="source-col">
+                        <span
+                          className={`source-icon source-icon--${question.source}`}
+                          title={meta.title}
+                          aria-label={meta.title}
+                        >
+                          {meta.short}
+                        </span>
+                      </td>
+                      <td className="time-col">{formatRelativeTime(question.created_at)}</td>
+                      <td className="row-actions actions-cell" onClick={(e) => e.stopPropagation()}>
+                        <div className="triage-group">
+                          <a href={question.url} target="_blank" rel="noopener noreferrer" className="view-link">
+                            Open
+                          </a>
+                          {question.status === 'new' && (
+                            <>
+                              <button
+                                type="button"
+                                className="triage-button triage-primary"
+                                disabled={generating}
+                                onClick={() => handleGenerate(question.id)}
+                              >
+                                {generating ? 'Generating…' : question.ai_answer ? 'Regenerate' : 'Generate AI'}
+                              </button>
+                              {question.ai_answer && (
+                                <button
+                                  type="button"
+                                  className="triage-button triage-secondary"
+                                  onClick={() => handleCopyAnswer(question)}
+                                >
+                                  {copiedKey === `answer-${question.id}` ? 'Copied' : 'Copy AI'}
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                className="triage-button triage-secondary"
+                                onClick={() => {
+                                  const answerUrl = prompt('Enter your forum answer URL:')
+                                  if (answerUrl) handleMarkAnswered(question.id, answerUrl)
+                                }}
+                              >
+                                Answered
+                              </button>
+                              <button
+                                type="button"
+                                className="triage-button triage-ghost"
+                                onClick={() => handleSkip(question.id)}
+                              >
+                                Skip
+                              </button>
+                            </>
                           )}
-                        </div>
-                      )}
-                    </td>
-                    <td>
-                      {question.ai_answer ? (
-                        <span className="ai-badge" title="Draft ready">✓</span>
-                      ) : (
-                        <span className="no-ai-badge">—</span>
-                      )}
-                    </td>
-                    <td className="source-col">
-                      <span
-                        className={`source-icon source-icon--${question.source}`}
-                        title={meta.title}
-                        aria-label={meta.title}
-                      >
-                        {meta.short}
-                      </span>
-                    </td>
-                    <td>{formatRelativeTime(question.created_at)}</td>
-                    <td className="row-actions actions-cell" onClick={(e) => e.stopPropagation()}>
-                      <div className="triage-group">
-                        <a href={question.url} target="_blank" rel="noopener noreferrer" className="view-link">
-                          Open
-                        </a>
-                        {question.status === 'new' && (
-                          <>
-                            <button
-                              type="button"
-                              className="triage-button triage-primary"
-                              disabled={generating}
-                              onClick={() => handleGenerate(question.id)}
-                            >
-                              {generating ? 'Generating…' : question.ai_answer ? 'Regenerate' : 'Generate AI'}
-                            </button>
-                            <button
-                              type="button"
-                              className="triage-button triage-secondary"
-                              onClick={() => {
-                                const answerUrl = prompt('Enter your forum answer URL:')
-                                if (answerUrl) handleMarkAnswered(question.id, answerUrl)
-                              }}
-                            >
-                              Answered
-                            </button>
+                          {question.status === 'archived' && (
                             <button
                               type="button"
                               className="triage-button triage-ghost"
-                              onClick={() => handleSkip(question.id)}
+                              onClick={() => handleStatusUpdate(question.id, { status: 'new' })}
                             >
-                              Skip
+                              Restore
                             </button>
-                          </>
-                        )}
-                        {question.status === 'archived' && (
-                          <button
-                            type="button"
-                            className="triage-button triage-ghost"
-                            onClick={() => handleStatusUpdate(question.id, { status: 'new' })}
-                          >
-                            Restore
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
+                          )}
+                          {question.status === 'answered' && question.ai_answer && (
+                            <button
+                              type="button"
+                              className="triage-button triage-secondary"
+                              onClick={() => handleCopyAnswer(question)}
+                            >
+                              {copiedKey === `answer-${question.id}` ? 'Copied' : 'Copy AI'}
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                    {expanded && (
+                      <tr className="detail-row">
+                        <td colSpan={colCount}>
+                          <div className="row-detail">
+                            <p className="row-detail-body">{question.description}</p>
+                            {question.ai_answer && (
+                              <div className="ai-answer-box">
+                                <div className="ai-answer-toolbar">
+                                  <strong>Draft reply</strong>
+                                  <button
+                                    type="button"
+                                    className="triage-button triage-secondary"
+                                    onClick={() => handleCopyAnswer(question)}
+                                  >
+                                    {copiedKey === `answer-${question.id}` ? 'Copied' : 'Copy reply'}
+                                  </button>
+                                </div>
+                                <p>{question.ai_answer}</p>
+                              </div>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 )
               })}
             </tbody>
