@@ -1,10 +1,10 @@
 """Forum question scraper.
 
 Monitors multiple sources for Squarespace CSS/JS questions and generates
-AI-powered answer suggestions using Qwen3 8B running locally in Docker.
+AI-powered answer suggestions using Groq API (free tier).
 
 Callers: backend/main.py refresh_forum_background → scrape()
-APIs: Stack Exchange API, Squarespace forum RSS feeds, Qwen3 8B local model via llama-cpp-python
+APIs: Stack Exchange API, Squarespace forum RSS feeds, Groq API
 Schema: forum_questions (source, source_id, title, ai_answer, status, ...)
 """
 import re
@@ -75,29 +75,13 @@ def get_time_filter(conn) -> datetime:
         return datetime.utcnow() - timedelta(days=7)  # Default to 7 days
 
 def generate_ai_answer(question: Dict) -> Optional[str]:
-    """Generate AI answer suggestion using local Qwen3 8B model."""
+    """Generate AI answer suggestion using Groq API (free tier)."""
     print(f"🤖 Attempting AI answer generation for: {question.get('title', '')[:50]}...")
 
-    try:
-        from llama_cpp import Llama
-        print("✓ llama-cpp-python imported successfully")
-    except ImportError as ie:
-        print(f"✗ llama-cpp-python not installed: {ie}")
-        print("  Install with: pip install llama-cpp-python")
-        return None
-    except Exception as e:
-        print(f"✗ Import error: {e}")
-        return None
-
-    model_path = os.getenv("QWEN_MODEL_PATH", "/app/models/qwen3-8b.gguf")
-    print(f"📂 Model path: {model_path}")
-
-    if not os.path.exists(model_path):
-        print(f"✗ Model file not found at: {model_path}")
-        print("  Solutions:")
-        print("  1. Download Qwen3 8B GGUF model to that path")
-        print("  2. Set QWEN_MODEL_PATH environment variable to correct location")
-        print("  3. Place model file at /app/models/qwen3-8b.gguf")
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        print("✗ GROQ_API_KEY not set in environment")
+        print("  Get your free API key at: https://console.groq.com/")
         return None
 
     title = question.get("title", "")
@@ -110,40 +94,39 @@ def generate_ai_answer(question: Dict) -> Optional[str]:
 If the question is about CSS/JS code, provide a simple solution. If it's about design/configuration, give clear guidance.
 Keep your answer under 2 sentences and be practical."""
 
-    # Initialize model (lazy load - only for first call)
-    if not hasattr(generate_ai_answer, '_model'):
+    # Initialize Groq client (lazy load - only for first call)
+    if not hasattr(generate_ai_answer, '_client'):
         try:
-            print("🔄 Loading AI model (first time)...")
-            generate_ai_answer._model = Llama(
-                model_path=model_path,
-                n_ctx=512,
-                n_threads=2,
-                verbose=False
-            )
-            print("✓ Local AI model loaded successfully")
-        except Exception as model_error:
-            print(f"✗ Failed to load AI model: {model_error}")
-            print("  This could be due to:")
-            print("  - Incompatible model format")
-            print("  - insufficient memory")
-            print("  - CPU architecture mismatch")
+            from groq import Groq
+            print("🔄 Initializing Groq client...")
+            generate_ai_answer._client = Groq(api_key=api_key)
+            print("✓ Groq client initialized successfully")
+        except ImportError as ie:
+            print(f"✗ groq package not installed: {ie}")
+            print("  Install with: pip install groq")
+            return None
+        except Exception as client_error:
+            print(f"✗ Failed to initialize Groq client: {client_error}")
             return None
 
-    model = generate_ai_answer._model
+    client = generate_ai_answer._client
 
     # Generate response with proper error handling
     try:
-        print("🧠 Generating AI response...")
-        response = model(
-            prompt,
+        print("🧠 Generating AI response via Groq...")
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",  # Fast, free tier model
+            messages=[
+                {"role": "system", "content": "You are a Squarespace expert who provides practical, concise answers to CSS/JS questions."},
+                {"role": "user", "content": prompt}
+            ],
             max_tokens=150,
             temperature=0.6,
-            stop=["\n\n\n", "###", "User:", "Question:"],
-            echo=False
+            stop=["\n\n\n", "###", "User:", "Question:"]
         )
 
-        if response and hasattr(response, 'choices') and len(response['choices']) > 0:
-            answer = response['choices'][0]['text'].strip()
+        if response and response.choices and len(response.choices) > 0:
+            answer = response.choices[0].message.content.strip()
             if answer and len(answer) > 10:  # Ensure meaningful answer
                 print(f"✓ AI answer generated: {answer[:50]}...")
                 return answer
@@ -151,14 +134,21 @@ Keep your answer under 2 sentences and be practical."""
                 print("✗ Generated answer too short or empty")
                 return None
         else:
-            print("✗ Unexpected response format from model")
+            print("✗ Unexpected response format from Groq API")
             print(f"  Response type: {type(response)}")
-            print(f"  Response attributes: {dir(response) if response else 'None'}")
             return None
 
-    except Exception as generation_error:
-        print(f"✗ Model generation failed: {generation_error}")
-        print(f"  Error type: {type(generation_error).__name__}")
+    except Exception as api_error:
+        print(f"✗ Groq API request failed: {api_error}")
+        print(f"  Error type: {type(api_error).__name__}")
+        # Check for common API errors
+        error_str = str(api_error).lower()
+        if "authentication" in error_str or "unauthorized" in error_str:
+            print("  Check your GROQ_API_KEY is valid")
+        elif "rate" in error_str or "limit" in error_str:
+            print("  Rate limit reached - try again later")
+        elif "credits" in error_str or "balance" in error_str:
+            print("  Account credits exhausted - check your Groq account")
         return None
 
 async def upsert_question(db, question_data: Dict) -> str:

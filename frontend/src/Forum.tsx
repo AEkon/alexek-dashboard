@@ -52,6 +52,14 @@ function formatRelativeTime(iso: string | null): string {
   return new Date(iso).toLocaleDateString()
 }
 
+function isLastDay(iso: string | null): boolean {
+  if (!iso) return false
+  const then = new Date(iso).getTime()
+  const now = Date.now()
+  const oneDayMs = 24 * 60 * 60 * 1000
+  return (now - then) < oneDayMs
+}
+
 export default function Forum() {
   const [questions, setQuestions] = useState<ForumQuestion[]>([])
   const [stats, setStats] = useState<ForumStats | null>(null)
@@ -139,10 +147,15 @@ export default function Forum() {
     await handleStatusUpdate(id, { status: 'archived' })
   }
 
-  const filteredQuestions = questions.filter(q =>
-    q.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    q.description.toLowerCase().includes(searchQuery.toLowerCase())
-  )
+  const filteredQuestions = questions.filter(q => {
+    const matchesSearch = searchQuery === '' ||
+      q.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      q.description.toLowerCase().includes(searchQuery.toLowerCase())
+
+    const isRecent = isLastDay(q.created_at)
+
+    return matchesSearch && isRecent
+  })
 
   const tabCount = (key: ForumStatus) => stats?.by_status[key] || 0
 
