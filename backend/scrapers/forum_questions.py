@@ -10,7 +10,7 @@ Schema: forum_questions (source, source_id, title, ai_answer, status, ...)
 import re
 import httpx
 import feedparser
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 import html
@@ -71,8 +71,9 @@ def get_time_filter(conn) -> datetime:
         # Use last scrape time, but add some overlap to catch any missed questions
         return last_scrape - timedelta(hours=2)  # 2 hour overlap
     else:
-        # No previous scrape, use default time window
-        return datetime.utcnow() - timedelta(days=7)  # Default to 7 days
+        # No previous scrape, use default time window (timezone-aware)
+        from datetime import timezone
+        return datetime.now(timezone.utc) - timedelta(days=7)  # Default to 7 days
 
 def generate_ai_answer(question: Dict) -> Optional[str]:
     """Generate AI answer suggestion using Groq API (free tier)."""
@@ -243,6 +244,7 @@ async def scrape_squarespace_rss(db, client: httpx.AsyncClient, cutoff_time: dat
 
             # Parse the published date
             try:
+                from datetime import timezone
                 if isinstance(published, str):
                     # Try parsing ISO format
                     try:
@@ -252,6 +254,11 @@ async def scrape_squarespace_rss(db, client: httpx.AsyncClient, cutoff_time: dat
                         published_dt = datetime.strptime(published, '%a, %d %b %Y %H:%M:%S %z')
                 else:
                     published_dt = published
+
+                # Ensure published_dt is timezone-aware for comparison
+                if published_dt.tzinfo is None:
+                    published_dt = published_dt.replace(tzinfo=timezone.utc)
+
             except Exception as e:
                 print(f"Error parsing date {published}: {e}")
                 continue
@@ -404,7 +411,7 @@ async def scrape_stackoverflow(db, client: httpx.AsyncClient, cutoff_time: datet
                         "description": description[:1000],  # Limit description length
                         "url": f"https://stackoverflow.com/questions/{question_id}",
                         "comments_count": answer_count,
-                        "created_at": datetime.fromtimestamp(creation_date).isoformat() if creation_date else datetime.utcnow().isoformat()
+                        "created_at": datetime.fromtimestamp(creation_date, tz=timezone.utc).isoformat() if creation_date else datetime.now(timezone.utc).isoformat()
                     }
 
                     # Generate AI answer for new posts or existing posts without AI answers
