@@ -158,30 +158,37 @@ async def upsert_question(db, question_data: Dict) -> str:
 
     now = datetime.utcnow().isoformat()
 
-    # Check if exists
+    # Check if exists and get AI answer status
     existing = db.execute(
-        "SELECT id, comments_count, status FROM forum_questions WHERE source = ? AND source_id = ?",
+        "SELECT id, comments_count, status, ai_answer FROM forum_questions WHERE source = ? AND source_id = ?",
         (source, source_id)
     ).fetchone()
 
     if existing:
-        # Update if comments count changed or status changed
-        db.execute("""
-            UPDATE forum_questions
-            SET title = ?, description = ?, url = ?, comments_count = ?,
-                ai_answer = ?, answer_generated_at = ?, updated_at = ?
-            WHERE source = ? AND source_id = ?
-        """, (
-            question_data.get("title", ""),
-            question_data.get("description", ""),
-            question_data.get("url", ""),
-            question_data.get("comments_count", 0),
-            question_data.get("ai_answer"),
-            question_data.get("answer_generated_at"),
-            now,
-            source, source_id
-        ))
-        return "updated"
+        # Check if existing post needs AI answer generation
+        needs_ai_answer = existing["ai_answer"] is None and question_data.get("ai_answer") is not None
+
+        # Update if comments count changed, status changed, or needs AI answer
+        if needs_ai_answer or existing["comments_count"] != question_data.get("comments_count", 0) or existing["status"] != question_data.get("status", "new"):
+            db.execute("""
+                UPDATE forum_questions
+                SET title = ?, description = ?, url = ?, comments_count = ?,
+                    ai_answer = COALESCE(?, ai_answer),
+                    answer_generated_at = COALESCE(?, answer_generated_at),
+                    updated_at = ?
+                WHERE source = ? AND source_id = ?
+            """, (
+                question_data.get("title", ""),
+                question_data.get("description", ""),
+                question_data.get("url", ""),
+                question_data.get("comments_count", 0),
+                question_data.get("ai_answer"),
+                question_data.get("answer_generated_at"),
+                now,
+                source, source_id
+            ))
+            return "updated" if needs_ai_answer else "updated_no_ai"
+        return "skipped"
     else:
         # Insert new
         db.execute("""
@@ -263,15 +270,20 @@ async def scrape_squarespace_rss(db, client: httpx.AsyncClient, cutoff_time: dat
             # Generate source_id from URL
             source_id = re.sub(r"[^\w-]", "", link.rstrip("/").split("/")[-1])[:80] or link[-50:]
 
-            # Check if already exists
+            # Check if already exists and get AI answer status
             existing = db.execute(
-                "SELECT id FROM forum_questions WHERE source = ? AND source_id = ?",
+                "SELECT id, ai_answer FROM forum_questions WHERE source = ? AND source_id = ?",
                 ("squarespace_forum", source_id)
             ).fetchone()
 
+            needs_ai_answer = False
             if existing:
-                rows += 1
-                continue
+                # If existing post has no AI answer, flag it for generation
+                if existing["ai_answer"] is None:
+                    needs_ai_answer = True
+                else:
+                    rows += 1
+                    continue
 
             # Build question data
             question_data = {
@@ -284,15 +296,16 @@ async def scrape_squarespace_rss(db, client: httpx.AsyncClient, cutoff_time: dat
                 "created_at": published_dt.isoformat() if published_dt else datetime.utcnow().isoformat()
             }
 
-            # Generate AI answer
-            print(f"Generating AI answer for: {title[:50]}...")
-            ai_answer = generate_ai_answer(question_data)
-            if ai_answer:
-                question_data["ai_answer"] = ai_answer
-                question_data["answer_generated_at"] = datetime.utcnow().isoformat()
-                print(f"✓ AI answer generated for: {title[:30]}")
-            else:
-                print(f"✗ No AI answer generated for: {title[:30]}")
+            # Generate AI answer for new posts or existing posts without AI answers
+            if not existing or needs_ai_answer:
+                print(f"Generating AI answer for: {title[:50]}...")
+                ai_answer = generate_ai_answer(question_data)
+                if ai_answer:
+                    question_data["ai_answer"] = ai_answer
+                    question_data["answer_generated_at"] = datetime.utcnow().isoformat()
+                    print(f"✓ AI answer generated for: {title[:30]}")
+                else:
+                    print(f"✗ No AI answer generated for: {title[:30]}")
 
             status = await upsert_question(db, question_data)
             if status == "inserted":
@@ -301,7 +314,7 @@ async def scrape_squarespace_rss(db, client: httpx.AsyncClient, cutoff_time: dat
                     "title": title,
                     "url": link,
                     "description": description[:200],
-                    "ai_answer": ai_answer,
+                    "ai_answer": question_data.get("ai_answer"),
                     "source": "squarespace_forum"
                 })
             rows += 1
@@ -368,15 +381,20 @@ async def scrape_stackoverflow(db, client: httpx.AsyncClient, cutoff_time: datet
 
                     source_id = str(question_id)
 
-                    # Check if already exists
+                    # Check if already exists and get AI answer status
                     existing = db.execute(
-                        "SELECT id FROM forum_questions WHERE source = ? AND source_id = ?",
+                        "SELECT id, ai_answer FROM forum_questions WHERE source = ? AND source_id = ?",
                         ("stackoverflow", source_id)
                     ).fetchone()
 
+                    needs_ai_answer = False
                     if existing:
-                        rows += 1
-                        continue
+                        # If existing post has no AI answer, flag it for generation
+                        if existing["ai_answer"] is None:
+                            needs_ai_answer = True
+                        else:
+                            rows += 1
+                            continue
 
                     # Build question data
                     question_data = {
@@ -389,15 +407,16 @@ async def scrape_stackoverflow(db, client: httpx.AsyncClient, cutoff_time: datet
                         "created_at": datetime.fromtimestamp(creation_date).isoformat() if creation_date else datetime.utcnow().isoformat()
                     }
 
-                    # Generate AI answer
-                    print(f"Generating AI answer for: {title[:50]}...")
-                    ai_answer = generate_ai_answer(question_data)
-                    if ai_answer:
-                        question_data["ai_answer"] = ai_answer
-                        question_data["answer_generated_at"] = datetime.utcnow().isoformat()
-                        print(f"✓ AI answer generated for: {title[:30]}")
-                    else:
-                        print(f"✗ No AI answer generated for: {title[:30]}")
+                    # Generate AI answer for new posts or existing posts without AI answers
+                    if not existing or needs_ai_answer:
+                        print(f"Generating AI answer for: {title[:50]}...")
+                        ai_answer = generate_ai_answer(question_data)
+                        if ai_answer:
+                            question_data["ai_answer"] = ai_answer
+                            question_data["answer_generated_at"] = datetime.utcnow().isoformat()
+                            print(f"✓ AI answer generated for: {title[:30]}")
+                        else:
+                            print(f"✗ No AI answer generated for: {title[:30]}")
 
                     status = await upsert_question(db, question_data)
                     if status == "inserted":
@@ -406,7 +425,7 @@ async def scrape_stackoverflow(db, client: httpx.AsyncClient, cutoff_time: datet
                             "title": title,
                             "url": f"https://stackoverflow.com/questions/{question_id}",
                             "description": description[:200],
-                            "ai_answer": ai_answer,
+                            "ai_answer": question_data.get("ai_answer"),
                             "source": "stackoverflow"
                         })
                     rows += 1
