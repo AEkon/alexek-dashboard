@@ -37,13 +37,13 @@ FORUM_KEYWORDS = [
 
 # Forum 39 (Customize with code) RSS has been stuck ~2024 — keep it last as a long shot.
 # Active categories below are what actually post fresh CSS/design questions.
+# Note: forum/39-customize-with-code.xml RSS is stuck in 2024 — do not use until SS fixes it.
 DEFAULT_SQUARESPACE_FEEDS = [
     ("squarespace_pages", "https://forum.squarespace.com/forum/42-pages-content.xml"),
     ("squarespace_design", "https://forum.squarespace.com/forum/45-site-design-styles.xml"),
     ("squarespace_media", "https://forum.squarespace.com/forum/41-images-videos.xml"),
     ("squarespace_commerce", "https://forum.squarespace.com/forum/40-commerce.xml"),
     ("squarespace_seo", "https://forum.squarespace.com/forum/43-seo.xml"),
-    ("squarespace_code", "https://forum.squarespace.com/forum/39-customize-with-code.xml"),
 ]
 
 REDDIT_FEEDS = [
@@ -320,9 +320,9 @@ async def ingest_rss_feed(
         cutoff_time = cutoff_time.replace(tzinfo=timezone.utc)
 
     twenty_four_hours_ago = datetime.now(timezone.utc) - timedelta(hours=24)
-    # Always scan at least the last 24h of the feed (retention window), even if
-    # the last scrape was more recent — avoids missing items when a feed recovers.
-    effective_cutoff = min(cutoff_time, twenty_four_hours_ago)
+    # Never look further back than 24h. If last scrape was more recent, still
+    # re-scan the full 24h window so recovered/late feed items are not missed.
+    effective_cutoff = twenty_four_hours_ago
 
     try:
         print(f"📡 Fetching {source}: {rss_url}")
@@ -631,6 +631,12 @@ async def scrape(db) -> Dict[str, object]:
 
     log_id = log_scrape_start(db, "forum_questions")
 
+    # Drop anything outside the 24h window before ingesting
+    try:
+        purge_forum_questions(db)
+    except Exception as cleanup_error:
+        print(f"Pre-scrape cleanup error: {cleanup_error}")
+
     # Get time filter based on last successful scrape
     cutoff_time = get_time_filter(db)
     print(f"🕐 Using time filter: since {cutoff_time.isoformat()}")
@@ -739,15 +745,61 @@ async def scrape(db) -> Dict[str, object]:
 
     return results
 
-def purge_forum_questions(conn) -> None:
-    """Clean up forum questions older than 24 hours."""
-    # Delete all questions older than 24 hours regardless of status
-    twenty_four_hours_ago = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+def parse_stored_datetime(value: Optional[str]) -> Optional[datetime]:
+    """Parse a created_at value from SQLite into aware UTC datetime."""
+    if not value:
+        return None
+    raw = str(value).strip()
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        for fmt in (
+            "%a, %d %b %Y %H:%M:%S %z",
+            "%a, %d %b %Y %H:%M:%S %Z",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S",
+        ):
+            try:
+                dt = datetime.strptime(raw, fmt)
+                break
+            except ValueError:
+                dt = None
+        if dt is None:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt
 
-    deleted_count = conn.execute(
-        "DELETE FROM forum_questions WHERE created_at < ?",
-        (twenty_four_hours_ago,)
-    ).rowcount
 
-    conn.commit()
-    print(f"Forum cleanup completed: deleted {deleted_count} questions older than 24 hours")
+def forum_retention_cutoff() -> datetime:
+    return datetime.now(timezone.utc) - timedelta(hours=24)
+
+
+def is_within_retention(created_at: Optional[str]) -> bool:
+    dt = parse_stored_datetime(created_at)
+    if dt is None:
+        return False
+    return dt >= forum_retention_cutoff()
+
+
+def purge_forum_questions(conn) -> int:
+    """Delete forum questions older than 24 hours (parsed datetimes, not string compare)."""
+    cutoff = forum_retention_cutoff()
+    rows = conn.execute("SELECT id, created_at FROM forum_questions").fetchall()
+    to_delete = []
+    for row in rows:
+        # Also drop unparseable timestamps — safer than showing ancient posts
+        created = row["created_at"] if not isinstance(row, tuple) else row[1]
+        row_id = row["id"] if not isinstance(row, tuple) else row[0]
+        dt = parse_stored_datetime(created)
+        if dt is None or dt < cutoff:
+            to_delete.append(row_id)
+
+    if to_delete:
+        conn.executemany("DELETE FROM forum_questions WHERE id = ?", [(i,) for i in to_delete])
+        conn.commit()
+
+    print(f"Forum cleanup completed: deleted {len(to_delete)} questions older than 24 hours")
+    return len(to_delete)

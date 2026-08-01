@@ -360,10 +360,7 @@ async def get_jobs(
     jobs = db.execute(
         f"""SELECT * FROM jobs
            WHERE {where_clause}
-           ORDER BY
-             CASE WHEN priority_score IS NULL THEN 1 ELSE 0 END,
-             priority_score DESC,
-             posted_date DESC
+           ORDER BY COALESCE(posted_date, created_at) DESC, id DESC
            LIMIT ?""",
         values,
     ).fetchall()
@@ -386,7 +383,7 @@ async def search_jobs(q: str, status: str = "new", limit: int = 50):
             f"""SELECT * FROM jobs
                WHERE status IN ({placeholders})
                AND (title LIKE ? OR description LIKE ? OR keyword_matches LIKE ?)
-               ORDER BY posted_date DESC
+               ORDER BY COALESCE(posted_date, created_at) DESC, id DESC
                LIMIT ?""",
             (*CLOSED_JOB_STATUSES, search_pattern, search_pattern, search_pattern, limit),
         ).fetchall()
@@ -395,7 +392,7 @@ async def search_jobs(q: str, status: str = "new", limit: int = 50):
             """SELECT * FROM jobs
                WHERE status = ?
                AND (title LIKE ? OR description LIKE ? OR keyword_matches LIKE ?)
-               ORDER BY posted_date DESC
+               ORDER BY COALESCE(posted_date, created_at) DESC, id DESC
                LIMIT ?""",
             (status, search_pattern, search_pattern, search_pattern, limit),
         ).fetchall()
@@ -618,23 +615,32 @@ async def get_forum_questions(
     source: Optional[str] = None,
     limit: int = 100
 ):
-    """Get forum questions with filtering (last 24h only — matches retention + badges)."""
+    """Get forum questions (strict last-24h retention)."""
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
-    since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-    query = "SELECT * FROM forum_questions WHERE status = ? AND created_at >= ?"
-    params: list = [status, since]
+    # Enforce retention on read so stale rows never reach the UI
+    try:
+        forum_questions.purge_forum_questions(db)
+    except Exception:
+        pass
 
+    query = "SELECT * FROM forum_questions WHERE status = ?"
+    params: list = [status]
     if source:
         query += " AND source = ?"
         params.append(source)
-
     query += " ORDER BY created_at DESC LIMIT ?"
-    params.append(limit)
+    params.append(max(limit * 3, 100))  # over-fetch then filter
 
-    questions = db.execute(query, params).fetchall()
-    return [dict(q) for q in questions]
+    rows = [dict(q) for q in db.execute(query, params).fetchall()]
+    fresh = [q for q in rows if forum_questions.is_within_retention(q.get("created_at"))]
+    fresh.sort(
+        key=lambda q: forum_questions.parse_stored_datetime(q.get("created_at"))
+        or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    return fresh[:limit]
 
 @app.post("/api/forum/refresh")
 async def refresh_forum(background_tasks: BackgroundTasks):
@@ -727,31 +733,30 @@ async def get_forum_stats():
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
-    since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    try:
+        forum_questions.purge_forum_questions(db)
+    except Exception:
+        pass
 
-    status_counts = db.execute("""
-        SELECT status, COUNT(*) as count
-        FROM forum_questions
-        WHERE created_at >= ?
-        GROUP BY status
-    """, (since,)).fetchall()
-
-    total_count = db.execute(
-        "SELECT COUNT(*) FROM forum_questions WHERE created_at >= ?",
-        (since,),
-    ).fetchone()
-
-    source_counts = db.execute("""
-        SELECT source, COUNT(*) as count
-        FROM forum_questions
-        WHERE status = 'new' AND created_at >= ?
-        GROUP BY source
-    """, (since,)).fetchall()
+    rows = db.execute("SELECT status, source, created_at FROM forum_questions").fetchall()
+    by_status: dict = {}
+    by_source: dict = {}
+    total = 0
+    for row in rows:
+        if not forum_questions.is_within_retention(row["created_at"]):
+            continue
+        total += 1
+        by_status[row["status"]] = by_status.get(row["status"], 0) + 1
+        if row["status"] == "new":
+            by_source[row["source"]] = by_source.get(row["source"], 0) + 1
 
     stats = {
-        "by_status": {row["status"]: row["count"] for row in status_counts},
-        "by_source": {row["source"]: row["count"] for row in source_counts},
-        "_debug": {"total_questions": total_count[0], "since": since},
+        "by_status": by_status,
+        "by_source": by_source,
+        "_debug": {
+            "total_questions": total,
+            "since": forum_questions.forum_retention_cutoff().isoformat(),
+        },
     }
 
     print(f"📊 Forum stats: {stats}")

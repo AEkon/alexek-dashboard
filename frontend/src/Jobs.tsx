@@ -248,10 +248,16 @@ export default function Jobs({ onInboxChange }: JobsProps) {
     await handleCopy(`pack-${job.id}`, pack)
   }
 
-  const filteredJobs = jobs.filter(job =>
-    job.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    job.description.toLowerCase().includes(searchQuery.toLowerCase())
-  )
+  const filteredJobs = jobs
+    .filter(job =>
+      job.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      job.description.toLowerCase().includes(searchQuery.toLowerCase())
+    )
+    .sort((a, b) => {
+      const ta = new Date(a.posted_date || a.created_at).getTime()
+      const tb = new Date(b.posted_date || b.created_at).getTime()
+      return tb - ta
+    })
 
   const tabCount = (key: JobStatus) => {
     if (key === 'closed') {

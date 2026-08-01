@@ -41,7 +41,7 @@ ENV PORT=8000
 ENV DATABASE_PATH=/app/data/dashboard.db
 ENV SCRAPE_INTERVAL_MINUTES=30
 ENV SCRAPE_ON_STARTUP=1
-ENV FORUM_RSS_URLS=squarespace_pages|https://forum.squarespace.com/forum/42-pages-content.xml,squarespace_design|https://forum.squarespace.com/forum/45-site-design-styles.xml,squarespace_media|https://forum.squarespace.com/forum/41-images-videos.xml,squarespace_commerce|https://forum.squarespace.com/forum/40-commerce.xml,squarespace_seo|https://forum.squarespace.com/forum/43-seo.xml,squarespace_code|https://forum.squarespace.com/forum/39-customize-with-code.xml
+ENV FORUM_RSS_URLS=squarespace_pages|https://forum.squarespace.com/forum/42-pages-content.xml,squarespace_design|https://forum.squarespace.com/forum/45-site-design-styles.xml,squarespace_media|https://forum.squarespace.com/forum/41-images-videos.xml,squarespace_commerce|https://forum.squarespace.com/forum/40-commerce.xml,squarespace_seo|https://forum.squarespace.com/forum/43-seo.xml
 ENV FORUM_SCRAPE_INTERVAL_MINUTES=30
 ENV FORUM_SCRAPE_ON_STARTUP=1
 

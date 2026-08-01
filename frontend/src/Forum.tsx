@@ -73,6 +73,13 @@ function sourceIconClass(source: string): string {
   return `source-icon source-icon--${source}`
 }
 
+function isWithinLastDay(iso: string | null): boolean {
+  if (!iso) return false
+  const then = new Date(iso).getTime()
+  if (Number.isNaN(then)) return false
+  return Date.now() - then < 24 * 60 * 60 * 1000
+}
+
 function formatRelativeTime(iso: string | null): string {
   if (!iso) return 'Unknown'
   const then = new Date(iso).getTime()
@@ -226,19 +233,21 @@ export default function Forum({ onInboxChange }: ForumProps) {
     flashCopied(`answer-${question.id}`)
   }
 
-  const filteredQuestions = questions.filter(q =>
-    searchQuery === '' ||
-    q.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    q.description.toLowerCase().includes(searchQuery.toLowerCase())
-  )
+  const filteredQuestions = questions
+    .filter(q => {
+      if (!isWithinLastDay(q.created_at)) return false
+      return (
+        searchQuery === '' ||
+        q.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        q.description.toLowerCase().includes(searchQuery.toLowerCase())
+      )
+    })
+    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
 
   // Prefer live list length for the active tab so the badge matches what you see
   // (search narrows the list; other tabs still use server stats).
   const tabCount = (key: ForumStatus) => {
-    if (key === activeTab && searchQuery === '') {
-      return questions.length
-    }
-    if (key === activeTab && searchQuery !== '') {
+    if (key === activeTab) {
       return filteredQuestions.length
     }
     return stats?.by_status[key] || 0
