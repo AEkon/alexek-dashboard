@@ -1397,6 +1397,11 @@ a.apply-drawer-open {
   color: #fff;
 }
 
+.source-icon--reddit {
+  background: #ff4500;
+  color: #fff;
+}
+
 .source-icon--freelancer {
   background: rgba(41, 152, 255, 0.15);
   color: #1769aa;

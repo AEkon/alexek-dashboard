@@ -616,15 +616,15 @@ async def get_jobs_stats():
 async def get_forum_questions(
     status: str = "new",
     source: Optional[str] = None,
-    limit: int = 50
+    limit: int = 100
 ):
-    """Get forum questions with filtering."""
+    """Get forum questions with filtering (last 24h only — matches retention + badges)."""
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
-    # Get all unsolved questions (Squarespace RSS doesn't provide comment counts)
-    query = "SELECT * FROM forum_questions WHERE status = ?"
-    params = [status]
+    since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    query = "SELECT * FROM forum_questions WHERE status = ? AND created_at >= ?"
+    params: list = [status, since]
 
     if source:
         query += " AND source = ?"
@@ -723,32 +723,35 @@ async def generate_forum_answer(question_id: int):
 
 @app.get("/api/forum/stats")
 async def get_forum_stats():
-    """Get forum statistics."""
+    """Get forum statistics for the same 24h window the list uses."""
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
-    # Get counts by status
+    since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+
     status_counts = db.execute("""
         SELECT status, COUNT(*) as count
         FROM forum_questions
+        WHERE created_at >= ?
         GROUP BY status
-    """).fetchall()
+    """, (since,)).fetchall()
 
-    # Get total count for debugging
-    total_count = db.execute("SELECT COUNT(*) FROM forum_questions").fetchone()
+    total_count = db.execute(
+        "SELECT COUNT(*) FROM forum_questions WHERE created_at >= ?",
+        (since,),
+    ).fetchone()
 
-    # Get counts by source
     source_counts = db.execute("""
         SELECT source, COUNT(*) as count
         FROM forum_questions
-        WHERE status = 'new'
+        WHERE status = 'new' AND created_at >= ?
         GROUP BY source
-    """).fetchall()
+    """, (since,)).fetchall()
 
     stats = {
         "by_status": {row["status"]: row["count"] for row in status_counts},
         "by_source": {row["source"]: row["count"] for row in source_counts},
-        "_debug": {"total_questions": total_count[0]}
+        "_debug": {"total_questions": total_count[0], "since": since},
     }
 
     print(f"📊 Forum stats: {stats}")

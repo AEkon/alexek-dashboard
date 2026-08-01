@@ -19,18 +19,64 @@ import os
 from db import log_scrape_start, log_scrape_end, is_scraper_running
 from notify import send_whatsapp
 
-USER_AGENT = "alexek-dashboard/1.0 (+https://hq.alexek.com)"
+# Browser-like UA — forum.squarespace.com Cloudflare often blocks custom bots.
+USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/126.0.0.0 Safari/537.36"
+)
 
 # CSS/JS/Design keywords for filtering
 FORUM_KEYWORDS = [
-    "css", "javascript", "js", "custom css", "code injection",
-    "design", "customization", "template", "style", "layout",
-    "responsive", "mobile", "header", "footer", "navigation",
-    "squarespace", "website", "page", "section", "block"
+    "css", "javascript", "js", "custom css", "code injection", "code block",
+    "design", "customization", "template", "style", "layout", "font",
+    "responsive", "mobile", "header", "footer", "navigation", "menu",
+    "squarespace", "website", "page", "section", "block", "spacing",
+    "gallery", "slideshow", "animation", "hover", "fluid engine",
 ]
 
-def is_forum_question(title: str, description: str = "") -> bool:
+# Forum 39 (Customize with code) RSS has been stuck ~2024 — keep it last as a long shot.
+# Active categories below are what actually post fresh CSS/design questions.
+DEFAULT_SQUARESPACE_FEEDS = [
+    ("squarespace_pages", "https://forum.squarespace.com/forum/42-pages-content.xml"),
+    ("squarespace_design", "https://forum.squarespace.com/forum/45-site-design-styles.xml"),
+    ("squarespace_media", "https://forum.squarespace.com/forum/41-images-videos.xml"),
+    ("squarespace_commerce", "https://forum.squarespace.com/forum/40-commerce.xml"),
+    ("squarespace_seo", "https://forum.squarespace.com/forum/43-seo.xml"),
+    ("squarespace_code", "https://forum.squarespace.com/forum/39-customize-with-code.xml"),
+]
+
+REDDIT_FEEDS = [
+    ("reddit_squarespace", "https://www.reddit.com/r/squarespace/new/.rss"),
+]
+
+
+def configured_squarespace_feeds() -> List[Tuple[str, str]]:
+    """FORUM_RSS_URLS=source|url,source|url  or legacy FORUM_RSS_URL=url."""
+    multi = os.getenv("FORUM_RSS_URLS", "").strip()
+    if multi:
+        feeds = []
+        for part in multi.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "|" in part:
+                source, url = part.split("|", 1)
+                feeds.append((source.strip(), url.strip()))
+            else:
+                feeds.append(("squarespace_forum", part))
+        if feeds:
+            return feeds
+    legacy = os.getenv("FORUM_RSS_URL", "").strip()
+    if legacy:
+        return [("squarespace_forum", legacy)]
+    return list(DEFAULT_SQUARESPACE_FEEDS)
+
+
+def is_forum_question(title: str, description: str = "", *, require_keyword: bool = True) -> bool:
     """Check if post matches CSS/JS/design criteria."""
+    if not require_keyword:
+        return True
     text = f"{title} {description}".lower()
     return any(keyword in text for keyword in FORUM_KEYWORDS)
 
@@ -228,125 +274,157 @@ async def upsert_question(db, question_data: Dict) -> str:
         ))
         return "inserted"
 
-async def scrape_squarespace_rss(db, client: httpx.AsyncClient, cutoff_time: datetime) -> Tuple[int, int, List[Dict]]:
-    """Scrape Squarespace forum RSS feed. Returns (rows, new_questions, new_questions_for_alert)."""
+def parse_entry_datetime(entry) -> Optional[datetime]:
+    """Parse published/updated from feedparser entry into aware UTC datetime."""
+    published = entry.get("published") or entry.get("updated")
+    parsed = entry.get("published_parsed") or entry.get("updated_parsed")
+    if parsed:
+        try:
+            return datetime(*parsed[:6], tzinfo=timezone.utc)
+        except Exception:
+            pass
+    if not published:
+        return None
+    if isinstance(published, datetime):
+        published_dt = published
+    else:
+        try:
+            published_dt = datetime.fromisoformat(str(published).replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                published_dt = datetime.strptime(str(published), "%a, %d %b %Y %H:%M:%S %z")
+            except ValueError:
+                return None
+    if published_dt.tzinfo is None:
+        published_dt = published_dt.replace(tzinfo=timezone.utc)
+    else:
+        published_dt = published_dt.astimezone(timezone.utc)
+    return published_dt
+
+
+async def ingest_rss_feed(
+    db,
+    client: httpx.AsyncClient,
+    *,
+    source: str,
+    rss_url: str,
+    cutoff_time: datetime,
+    require_keyword: bool = True,
+) -> Tuple[int, int, List[Dict]]:
+    """Fetch one RSS/Atom feed and upsert matching questions."""
     rows = 0
     new_questions = 0
-    new_questions_for_alert = []
+    new_for_alert: List[Dict] = []
 
-    # Squarespace forum RSS feed for code customization
-    rss_url = "https://forum.squarespace.com/forum/39-customize-with-code.xml"
+    if cutoff_time.tzinfo is None:
+        cutoff_time = cutoff_time.replace(tzinfo=timezone.utc)
+
+    twenty_four_hours_ago = datetime.now(timezone.utc) - timedelta(hours=24)
+    # Always scan at least the last 24h of the feed (retention window), even if
+    # the last scrape was more recent — avoids missing items when a feed recovers.
+    effective_cutoff = min(cutoff_time, twenty_four_hours_ago)
 
     try:
-        print(f"📡 Fetching Squarespace forum RSS: {rss_url}")
-        print(f"🕐 Filtering questions since: {cutoff_time.isoformat()}")
-
+        print(f"📡 Fetching {source}: {rss_url}")
         resp = await client.get(rss_url, timeout=30)
         if resp.status_code != 200:
-            print(f"✗ Failed to fetch Squarespace RSS: HTTP {resp.status_code}")
+            print(f"✗ Failed {source}: HTTP {resp.status_code}")
             return 0, 0, []
 
         feed = feedparser.parse(resp.content)
         if not feed.entries:
-            print("✗ No entries found in Squarespace RSS feed")
+            print(f"✗ No entries in {source}")
             return 0, 0, []
 
-        print(f"✓ Found {len(feed.entries)} entries in Squarespace RSS feed")
+        print(f"✓ {source}: {len(feed.entries)} entries")
 
         for entry in feed.entries:
             title = clean_html(entry.get("title", ""))
             description = clean_html(entry.get("summary") or entry.get("description", ""))
             link = entry.get("link", "")
-            published = entry.get("published") or entry.get("updated") or datetime.now(timezone.utc).isoformat()
-
-            # Parse the published date
-            try:
-                if isinstance(published, str):
-                    # Try parsing ISO format
-                    try:
-                        published_dt = datetime.fromisoformat(published.replace('Z', '+00:00'))
-                    except ValueError:
-                        # Try parsing feedparser format
-                        published_dt = datetime.strptime(published, '%a, %d %b %Y %H:%M:%S %z')
-                else:
-                    published_dt = published
-
-                # Ensure published_dt is timezone-aware for comparison
-                if published_dt.tzinfo is None:
-                    published_dt = published_dt.replace(tzinfo=timezone.utc)
-                # Convert both to UTC for consistent comparison
-                elif published_dt.tzinfo != timezone.utc:
-                    published_dt = published_dt.astimezone(timezone.utc)
-
-            except Exception as e:
-                print(f"Error parsing date {published}: {e}")
+            published_dt = parse_entry_datetime(entry)
+            if not published_dt:
                 continue
 
-            # Ensure cutoff_time is timezone-aware for comparison
-            if cutoff_time.tzinfo is None:
-                cutoff_time = cutoff_time.replace(tzinfo=timezone.utc)
-
-            # 24-hour retention policy: skip if older than 24 hours
-            twenty_four_hours_ago = datetime.now(timezone.utc) - timedelta(hours=24)
             if published_dt < twenty_four_hours_ago:
-                print(f"⏭️ Skipping question older than 24h: {title[:30]}...")
                 continue
-
-            # Check if this is newer than our cutoff time (for incremental scraping)
-            if published_dt < cutoff_time:
+            if published_dt < effective_cutoff:
                 continue
-
             if not title or not link:
                 continue
-
-            # Filter for CSS/JS/design questions only
-            if not is_forum_question(title, description):
+            if not is_forum_question(title, description, require_keyword=require_keyword):
                 continue
 
-            # Generate source_id from URL
             source_id = re.sub(r"[^\w-]", "", link.rstrip("/").split("/")[-1])[:80] or link[-50:]
-
-            # Skip duplicates — AI answers are generated on demand from the UI
             existing = db.execute(
                 "SELECT id FROM forum_questions WHERE source = ? AND source_id = ?",
-                ("squarespace_forum", source_id)
+                (source, source_id),
             ).fetchone()
-
             if existing:
                 rows += 1
                 continue
 
-            print(f"🆕 New question: {title[:30]}...")
-
-            # Build question data (AI answers are generated on demand from the UI)
+            print(f"🆕 [{source}] {title[:40]}...")
             question_data = {
-                "source": "squarespace_forum",
+                "source": source,
                 "source_id": source_id,
                 "title": title,
-                "description": description[:1000],  # Limit description length
+                "description": description[:1000],
                 "url": link,
-                "comments_count": 0,  # Don't track comment counts for RSS
-                "created_at": published_dt.isoformat() if published_dt else datetime.now(timezone.utc).isoformat()
+                "comments_count": 0,
+                "created_at": published_dt.isoformat(),
             }
-
             status = await upsert_question(db, question_data)
-            print(f"📝 Database status: {status}")
-
             if status == "inserted":
                 new_questions += 1
-                new_questions_for_alert.append({
+                new_for_alert.append({
                     "title": title,
                     "url": link,
                     "description": description[:200],
-                    "ai_answer": question_data.get("ai_answer"),
-                    "source": "squarespace_forum"
+                    "ai_answer": None,
+                    "source": source,
                 })
             rows += 1
 
     except Exception as e:
-        print(f"✗ Error scraping Squarespace RSS: {e}")
+        print(f"✗ Error scraping {source}: {e}")
 
-    return rows, new_questions, new_questions_for_alert
+    return rows, new_questions, new_for_alert
+
+
+async def scrape_squarespace_rss(db, client: httpx.AsyncClient, cutoff_time: datetime) -> Tuple[int, int, List[Dict]]:
+    """Scrape active Squarespace forum category RSS feeds."""
+    rows = 0
+    new_questions = 0
+    new_for_alert: List[Dict] = []
+
+    # Design/pages forums are already on-topic — still keyword-filter commerce/seo/media
+    # but keep keywords broad enough that layout/CSS asks pass.
+    for source, url in configured_squarespace_feeds():
+        r, n, alerts = await ingest_rss_feed(
+            db, client, source=source, rss_url=url, cutoff_time=cutoff_time, require_keyword=True
+        )
+        rows += r
+        new_questions += n
+        new_for_alert.extend(alerts)
+
+    return rows, new_questions, new_for_alert
+
+
+async def scrape_reddit(db, client: httpx.AsyncClient, cutoff_time: datetime) -> Tuple[int, int, List[Dict]]:
+    """Scrape Reddit Squarespace new posts via public RSS."""
+    rows = 0
+    new_questions = 0
+    new_for_alert: List[Dict] = []
+    for source, url in REDDIT_FEEDS:
+        r, n, alerts = await ingest_rss_feed(
+            db, client, source=source, rss_url=url, cutoff_time=cutoff_time, require_keyword=True
+        )
+        rows += r
+        new_questions += n
+        new_for_alert.extend(alerts)
+    return rows, new_questions, new_for_alert
+
 
 async def scrape_stackoverflow(db, client: httpx.AsyncClient, cutoff_time: datetime) -> Tuple[int, int, List[Dict]]:
     """Scrape Stack Overflow for Squarespace CSS/JS questions. Returns (rows, new_questions, new_questions_for_alert)."""
@@ -354,23 +432,23 @@ async def scrape_stackoverflow(db, client: httpx.AsyncClient, cutoff_time: datet
     new_questions = 0
     new_questions_for_alert = []
 
-    # Search terms for Squarespace CSS/JS questions
-    search_tags = ['squarespace', 'css', 'javascript']
+    # Only Squarespace-tagged questions (optionally AND css / javascript).
+    # Bare css/javascript tags drown the feed in unrelated SO noise.
+    search_tags = ['squarespace', 'squarespace;css', 'squarespace;javascript']
 
     try:
         for tag in search_tags:
             print(f"🔍 Searching Stack Overflow for: {tag}")
 
-            # Stack Exchange API - search for recent questions with these tags
             api_url = f"https://api.stackexchange.com/2.3/questions"
             params = {
                 'order': 'desc',
                 'sort': 'creation',
                 'tagged': tag,
                 'site': 'stackoverflow',
-                'filter': 'withbody',  # Include question body
+                'filter': 'withbody',
                 'pagesize': 50,
-                'fromdate': int(cutoff_time.timestamp())  # Since cutoff time
+                'fromdate': int((datetime.now(timezone.utc) - timedelta(hours=24)).timestamp()),
             }
 
             try:
@@ -559,18 +637,26 @@ async def scrape(db) -> Dict[str, object]:
 
     results = {
         "squarespace_forum": 0,
+        "reddit": 0,
         "stackoverflow": 0,
         "total_questions": 0,
         "new_questions": 0,
         "status": "running",
-        "errors": []
+        "errors": [],
+        "feeds": [url for _, url in configured_squarespace_feeds()],
     }
 
     all_new_questions = []  # Collect all new questions for alerts
 
     try:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
-            # Scrape Squarespace forum RSS
+        async with httpx.AsyncClient(
+            timeout=30,
+            follow_redirects=True,
+            headers={
+                "User-Agent": USER_AGENT,
+                "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*",
+            },
+        ) as client:
             try:
                 count, new_q, new_for_alert = await scrape_squarespace_rss(db, client, cutoff_time)
                 results["squarespace_forum"] = count
@@ -582,7 +668,17 @@ async def scrape(db) -> Dict[str, object]:
                 results["errors"].append(error_msg)
                 print(error_msg)
 
-            # Scrape Stack Overflow
+            try:
+                count, new_q, new_for_alert = await scrape_reddit(db, client, cutoff_time)
+                results["reddit"] = count
+                results["total_questions"] += count
+                results["new_questions"] += new_q
+                all_new_questions.extend(new_for_alert)
+            except Exception as scrape_error:
+                error_msg = f"Reddit scraping failed: {str(scrape_error)}"
+                results["errors"].append(error_msg)
+                print(error_msg)
+
             try:
                 count, new_q, new_for_alert = await scrape_stackoverflow(db, client, cutoff_time)
                 results["stackoverflow"] = count

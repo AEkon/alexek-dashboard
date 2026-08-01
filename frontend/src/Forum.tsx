@@ -45,11 +45,32 @@ const EMPTY_COPY: Record<ForumStatus, string> = {
 
 const SOURCE_META: Record<string, { label: string; short: string; title: string }> = {
   squarespace_forum: { label: 'SS', short: 'SS', title: 'Squarespace Forum' },
+  squarespace_pages: { label: 'SS', short: 'SS', title: 'Squarespace · Pages & Content' },
+  squarespace_design: { label: 'SS', short: 'SS', title: 'Squarespace · Site Design' },
+  squarespace_media: { label: 'SS', short: 'SS', title: 'Squarespace · Images & Videos' },
+  squarespace_commerce: { label: 'SS', short: 'SS', title: 'Squarespace · Commerce' },
+  squarespace_seo: { label: 'SS', short: 'SS', title: 'Squarespace · SEO' },
+  squarespace_code: { label: 'SS', short: 'SS', title: 'Squarespace · Customize with code' },
+  reddit_squarespace: { label: 'RD', short: 'RD', title: 'Reddit r/squarespace' },
   stackoverflow: { label: 'SO', short: 'SO', title: 'Stack Overflow' },
 }
 
 function sourceMeta(source: string) {
-  return SOURCE_META[source] || { label: source.slice(0, 2).toUpperCase(), short: source.slice(0, 2).toUpperCase(), title: source }
+  if (SOURCE_META[source]) return SOURCE_META[source]
+  if (source.startsWith('squarespace')) {
+    return { label: 'SS', short: 'SS', title: source.replace(/_/g, ' ') }
+  }
+  if (source.startsWith('reddit')) {
+    return { label: 'RD', short: 'RD', title: source.replace(/_/g, ' ') }
+  }
+  return { label: source.slice(0, 2).toUpperCase(), short: source.slice(0, 2).toUpperCase(), title: source }
+}
+
+function sourceIconClass(source: string): string {
+  if (source.startsWith('squarespace')) return 'source-icon source-icon--squarespace'
+  if (source.startsWith('reddit')) return 'source-icon source-icon--reddit'
+  if (source === 'stackoverflow') return 'source-icon source-icon--stackoverflow'
+  return `source-icon source-icon--${source}`
 }
 
 function formatRelativeTime(iso: string | null): string {
@@ -65,12 +86,6 @@ function formatRelativeTime(iso: string | null): string {
   return new Date(iso).toLocaleDateString()
 }
 
-function isLastDay(iso: string | null): boolean {
-  if (!iso) return false
-  const then = new Date(iso).getTime()
-  const now = Date.now()
-  return (now - then) < 24 * 60 * 60 * 1000
-}
 
 async function copyText(text: string) {
   try {
@@ -211,14 +226,23 @@ export default function Forum({ onInboxChange }: ForumProps) {
     flashCopied(`answer-${question.id}`)
   }
 
-  const filteredQuestions = questions.filter(q => {
-    const matchesSearch = searchQuery === '' ||
-      q.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      q.description.toLowerCase().includes(searchQuery.toLowerCase())
-    return matchesSearch && isLastDay(q.created_at)
-  })
+  const filteredQuestions = questions.filter(q =>
+    searchQuery === '' ||
+    q.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    q.description.toLowerCase().includes(searchQuery.toLowerCase())
+  )
 
-  const tabCount = (key: ForumStatus) => stats?.by_status[key] || 0
+  // Prefer live list length for the active tab so the badge matches what you see
+  // (search narrows the list; other tabs still use server stats).
+  const tabCount = (key: ForumStatus) => {
+    if (key === activeTab && searchQuery === '') {
+      return questions.length
+    }
+    if (key === activeTab && searchQuery !== '') {
+      return filteredQuestions.length
+    }
+    return stats?.by_status[key] || 0
+  }
   const colCount = 5
 
   return (
@@ -310,7 +334,7 @@ export default function Forum({ onInboxChange }: ForumProps) {
                       </td>
                       <td className="source-col">
                         <span
-                          className={`source-icon source-icon--${question.source}`}
+                          className={sourceIconClass(question.source)}
                           title={meta.title}
                           aria-label={meta.title}
                         >
