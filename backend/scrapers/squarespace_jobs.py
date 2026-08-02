@@ -230,6 +230,27 @@ def freelancer_rss_url(keyword: str) -> str:
     return f"https://www.freelancer.com/rss.xml?keyword={quote_plus(keyword)}"
 
 
+def freelancer_source_id(entry, link: str) -> str:
+    """Prefer stable numeric project id; avoid title-slug IDs that change when renamed."""
+    guid = str(entry.get("id") or entry.get("guid") or "")
+    for text in (guid, link or ""):
+        m = re.search(r"Freelancer_project_(\d+)", text, re.I)
+        if m:
+            return m.group(1)
+        m = re.search(r"/projects/(\d+)(?:\D|$)", text)
+        if m:
+            return m.group(1)
+        # /projects/category/title-words-12345678
+        m = re.search(r"/projects/[^/]+/[^/]*?(\d{6,})(?:\D|$)", text)
+        if m:
+            return m.group(1)
+        m = re.search(r"(\d{6,})", text)
+        if m and "freelancer.com" in text.lower():
+            return m.group(1)
+    slug = re.sub(r"[^\w-]", "", (link or "").rstrip("/").split("/")[-1])[:80]
+    return slug or (link or "")[-50:]
+
+
 def detect_job_kind(title: str, description: str, keyword_matches: str = "") -> str:
     """Classify listing for proposal templates + outcome bias: fix|css|redesign|general."""
     text = f"{title} {description} {keyword_matches}".lower()
@@ -629,6 +650,7 @@ def persist_squarespace_listing(
             "budget": str(budget_info["budget"]) if budget_info else None,
             "priority_score": priority,
             "source": source,
+            "source_id": str(source_id),
         }
     return action, new_job
 
@@ -760,16 +782,7 @@ async def _ingest_freelancer_entries(db, entries, outcome_mults: Dict[str, float
         if not is_squarespace_job(title, description):
             continue
 
-        source_id = None
-        guid = str(entry.get("id") or entry.get("guid") or "")
-        guid_match = re.search(r"Freelancer_project_(\d+)", guid)
-        id_match = re.search(r"/projects/(\d+)", link)
-        if guid_match:
-            source_id = guid_match.group(1)
-        elif id_match:
-            source_id = id_match.group(1)
-        else:
-            source_id = re.sub(r"[^\w-]", "", link.rstrip("/").split("/")[-1])[:80] or link[-50:]
+        source_id = freelancer_source_id(entry, link)
 
         if source_id in seen_ids:
             continue
@@ -813,6 +826,8 @@ async def _ingest_freelancer_entries(db, entries, outcome_mults: Dict[str, float
                 "url": link,
                 "budget": str(budget_info["budget"]) if budget_info else None,
                 "priority_score": priority,
+                "source": "freelancer",
+                "source_id": source_id,
             })
 
     return rows, new_jobs
@@ -920,6 +935,8 @@ async def scrape_peopleperhour_rss(db):
                     "url": link,
                     "budget": str(budget_info["budget"]) if budget_info else None,
                     "priority_score": priority,
+                    "source": "peopleperhour",
+                    "source_id": source_id,
                 })
         db.commit()
     except Exception as e:
@@ -1060,6 +1077,8 @@ async def scrape_upwork_graphql(db):
                 "url": url,
                 "budget": str(budget_info["budget"]) if budget_info else None,
                 "priority_score": priority,
+                "source": "upwork",
+                "source_id": job_id[:80],
             })
 
     db.commit()
@@ -1550,7 +1569,7 @@ async def scrape(db) -> Tuple[int, Optional[str]]:
     if gone_count:
         print(f"Marked {gone_count} job(s) as gone")
 
-    alert_err = await notify_new_high_score_jobs(list(results.get("new_jobs") or []))
+    alert_err = await notify_new_high_score_jobs(db, list(results.get("new_jobs") or []))
     if alert_err:
         error_msg = f"{error_msg}; alerts: {alert_err}" if error_msg else f"alerts: {alert_err}"
 

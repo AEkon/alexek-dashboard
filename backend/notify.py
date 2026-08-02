@@ -83,10 +83,16 @@ async def send_whatsapp(text: str) -> Optional[str]:
         return str(e)
 
 
-async def notify_new_high_score_jobs(jobs: List[Dict[str, Any]]) -> Optional[str]:
-    """Alert for newly inserted jobs at/above ALERT_MIN_SCORE. Digest by default."""
+async def notify_new_high_score_jobs(db, jobs: List[Dict[str, Any]]) -> Optional[str]:
+    """Alert for newly inserted jobs at/above ALERT_MIN_SCORE. Digest by default.
+
+    Uses job_alert_sent ledger so the same gig is never WhatsApp'd twice,
+    even if the jobs row is deleted and re-inserted on a later scrape.
+    """
     if not alerts_configured() or not jobs:
         return None
+
+    from db import job_already_alerted, mark_jobs_alerted
 
     threshold = alert_min_score()
     cap = alert_max_per_scrape()
@@ -96,21 +102,41 @@ async def notify_new_high_score_jobs(jobs: List[Dict[str, Any]]) -> Optional[str
     eligible = [
         j
         for j in jobs
-        if j.get("priority_score") is not None and float(j["priority_score"]) >= threshold
+        if j.get("priority_score") is not None
+        and float(j["priority_score"]) >= threshold
+        and not job_already_alerted(db, j)
     ]
+    # Dedupe within this scrape by url / source_id
+    seen = set()
+    deduped = []
+    for j in eligible:
+        fingerprint = (j.get("url") or "").strip() or f"{j.get('source')}:{j.get('source_id')}"
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        deduped.append(j)
+    eligible = deduped
     eligible.sort(key=lambda j: float(j.get("priority_score") or 0), reverse=True)
     eligible = eligible[:cap]
     if not eligible:
         return None
 
     if alert_digest_enabled():
-        return await send_whatsapp(format_digest(eligible))
+        err = await send_whatsapp(format_digest(eligible))
+        if not err:
+            mark_jobs_alerted(db, eligible)
+        return err
 
     errors: List[str] = []
+    sent = []
     for job in eligible:
         err = await send_whatsapp(format_job_alert(job))
         if err:
             errors.append(err)
+        else:
+            sent.append(job)
+    if sent:
+        mark_jobs_alerted(db, sent)
     if errors:
         return "; ".join(errors[:3])
     return None

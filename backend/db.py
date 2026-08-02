@@ -127,6 +127,12 @@ def migrate(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_forum_questions_status ON forum_questions(status)",
         "CREATE INDEX IF NOT EXISTS idx_forum_questions_source ON forum_questions(source)",
         "CREATE INDEX IF NOT EXISTS idx_forum_questions_comments_count ON forum_questions(comments_count)",
+
+        # Durable WhatsApp alert ledger — survives job row delete/re-insert
+        """CREATE TABLE IF NOT EXISTS job_alert_sent (
+            alert_key TEXT PRIMARY KEY,
+            sent_at TEXT NOT NULL
+        )""",
     ]
 
     for sql in migrations:
@@ -159,6 +165,25 @@ def migrate(conn: sqlite3.Connection) -> None:
             conn.execute(sql)
         except sqlite3.OperationalError:
             pass  # Column already exists
+
+    # Seed alert ledger from current jobs so redeploys don't re-ping old gigs
+    try:
+        conn.execute(
+            """INSERT OR IGNORE INTO job_alert_sent (alert_key, sent_at)
+               SELECT 'source:' || source || ':' || source_id,
+                      COALESCE(created_at, ?)
+               FROM jobs""",
+            (datetime.utcnow().isoformat(),),
+        )
+        conn.execute(
+            """INSERT OR IGNORE INTO job_alert_sent (alert_key, sent_at)
+               SELECT 'url:' || url, COALESCE(created_at, ?)
+               FROM jobs
+               WHERE url IS NOT NULL AND TRIM(url) != ''""",
+            (datetime.utcnow().isoformat(),),
+        )
+    except sqlite3.OperationalError:
+        pass
 
     conn.commit()
 
@@ -254,3 +279,39 @@ def is_scraper_running(conn: sqlite3.Connection, scraper_name: str) -> bool:
         (scraper_name,)
     ).fetchone()
     return running is not None
+
+
+def job_alert_keys(job: dict) -> list:
+    """Stable keys used to suppress duplicate WhatsApp alerts."""
+    keys = []
+    source = (job.get("source") or "").strip()
+    source_id = str(job.get("source_id") or "").strip()
+    if source and source_id:
+        keys.append(f"source:{source}:{source_id}")
+    url = (job.get("url") or "").strip()
+    if url:
+        keys.append(f"url:{url}")
+    return keys
+
+
+def job_already_alerted(conn: sqlite3.Connection, job: dict) -> bool:
+    keys = job_alert_keys(job)
+    if not keys:
+        return False
+    placeholders = ",".join("?" for _ in keys)
+    row = conn.execute(
+        f"SELECT 1 FROM job_alert_sent WHERE alert_key IN ({placeholders}) LIMIT 1",
+        keys,
+    ).fetchone()
+    return row is not None
+
+
+def mark_jobs_alerted(conn: sqlite3.Connection, jobs: list) -> None:
+    now = datetime.utcnow().isoformat()
+    for job in jobs:
+        for key in job_alert_keys(job):
+            conn.execute(
+                "INSERT OR IGNORE INTO job_alert_sent (alert_key, sent_at) VALUES (?, ?)",
+                (key, now),
+            )
+    conn.commit()
