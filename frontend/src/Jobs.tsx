@@ -416,7 +416,7 @@ export default function Jobs({ onInboxChange }: JobsProps) {
       <div className="section-divider">
         <h3 className="section-title">Job Opportunities</h3>
         <p className="section-description">
-          Squarespace listings from freelance and remote boards — generate a proposal pack when ready to bid
+          Freelance Squarespace design/dev gigs — generate a proposal pack when ready to bid
         </p>
       </div>
 

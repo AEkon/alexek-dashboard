@@ -1,8 +1,8 @@
 """Squarespace job scrapers.
 
 Callers: backend/main.py refresh_jobs_background → scrape().
-APIs: Freelancer RSS; PPH; Jobicy; Remote OK; Remotive; WWR; Arbeitnow;
-      optional Upwork GraphQL, Adzuna, and JOB_RSS_URLS (Vollna/Vibeworker/custom).
+APIs: Freelancer RSS; PPH; optional Upwork GraphQL and JOB_RSS_URLS
+      (Vollna/Vibeworker freelance feeds). Employment boards disabled.
 Schema: jobs (source, source_id, title, ...), scrape_log.
 """
 import feedparser
@@ -279,6 +279,29 @@ def is_squarespace_anti_mention(title: str, description: str) -> bool:
     if re.search(r"(?:no|not|avoid|exclude)[^\n.]{0,40}squarespace", text):
         return True
     return False
+
+
+def is_employment_listing(title: str, description: str, *, source: str = "") -> bool:
+    """True for full-time / salaried roles — we only want freelance Squarespace gigs."""
+    if source in EMPLOYMENT_SOURCES:
+        return True
+    text = f"{title} {description}".lower()
+    freelance_signals = (
+        "freelance", "freelancer", "contract", "contractor", "gig",
+        "fixed price", "fixed-price", "hourly", "project-based", "one-time",
+        "one time", "ad-hoc", "adhoc",
+    )
+    if any(s in text for s in freelance_signals):
+        return False
+    employment_signals = (
+        "full-time", "full time", "fulltime", "full time employee",
+        "permanent role", "permanent position", "salaried",
+        "salary:", "annual salary", "per annum", "per year", "/year",
+        "benefits package", "health insurance", "401(k)", "401k",
+        "paid time off", "pto", "w-2", "w2 ", "staff position",
+        "join our team", "we're hiring", "we are hiring",
+    )
+    return any(s in text for s in employment_signals)
 
 
 def matched_keywords(title: str, description: str) -> str:
@@ -602,6 +625,8 @@ def persist_squarespace_listing(
         return "skip", None
     if not is_squarespace_job(title, description):
         return "skip", None
+    if is_employment_listing(title, description, source=source):
+        return "skip", None
     if allow_unbudgeted and is_squarespace_anti_mention(title, description):
         return "skip", None
 
@@ -621,8 +646,6 @@ def persist_squarespace_listing(
         return "skip", None
 
     job_type = "short-term" if is_short_term_job(title, description) or effort <= 3 else "unknown"
-    if allow_unbudgeted and source in EMPLOYMENT_SOURCES and not is_short_term_job(title, description):
-        job_type = "employment"
 
     action = upsert_job(
         db,
@@ -781,6 +804,8 @@ async def _ingest_freelancer_entries(db, entries, outcome_mults: Dict[str, float
             continue
         if not is_squarespace_job(title, description):
             continue
+        if is_employment_listing(title, description, source="freelancer"):
+            continue
 
         source_id = freelancer_source_id(entry, link)
 
@@ -897,6 +922,8 @@ async def scrape_peopleperhour_rss(db):
             link = entry.get("link", "")
             published = entry.get("published") or entry.get("updated") or ""
             if not title or not link or not is_squarespace_job(title, description):
+                continue
+            if is_employment_listing(title, description, source="peopleperhour"):
                 continue
 
             source_id = re.sub(r"[^\w-]", "", link.rstrip("/").split("/")[-1])[:80] or link[-50:]
@@ -1036,6 +1063,8 @@ async def scrape_upwork_graphql(db):
         if not title or not job_id:
             continue
         if not is_squarespace_job(title, description):
+            continue
+        if is_employment_listing(title, description, source="upwork"):
             continue
 
         url = f"https://www.upwork.com/jobs/{ciphertext}" if ciphertext else f"https://www.upwork.com/jobs/~{job_id}"
@@ -1467,28 +1496,44 @@ async def scrape_extra_job_rss(db):
     return rows, new_jobs
 
 
+def purge_employment_jobs(db) -> int:
+    """Remove employment-board rows left over from earlier scrapes."""
+    sources = sorted(EMPLOYMENT_SOURCES)
+    placeholders = ",".join("?" for _ in sources)
+    cur = db.execute(
+        f"DELETE FROM jobs WHERE source IN ({placeholders}) OR job_type = 'employment'",
+        sources,
+    )
+    db.commit()
+    return int(cur.rowcount or 0)
+
+
 async def scrape_all(db) -> Dict[str, object]:
-    """Run configured sources independently; collect counts, new jobs, and errors."""
+    """Run freelance sources only (Freelancer / PPH / Upwork / optional custom RSS)."""
+    # Drop leftover full-time board listings from the inbox
+    try:
+        removed = purge_employment_jobs(db)
+        if removed:
+            print(f"Purged {removed} employment-board job(s)")
+    except Exception as e:
+        print(f"Employment purge soft-skip: {e}")
+
     source_keys = [
         "freelancer",
         "peopleperhour",
         "upwork",
-        "jobicy",
-        "remoteok",
-        "remotive",
-        "weworkremotely",
-        "arbeitnow",
-        "adzuna",
         "extra_rss",
     ]
     results: Dict[str, object] = {k: 0 for k in source_keys}
     results["total"] = 0
     results["errors"] = []
-    results["skipped"] = []
+    results["skipped"] = [
+        "jobicy/remoteok/remotive/wwr/arbeitnow/adzuna (employment boards disabled — freelance only)",
+    ]
     results["new_jobs"] = []
     errors: List[str] = []
     new_jobs: List[dict] = []
-    skipped: List[str] = []
+    skipped: List[str] = list(results["skipped"])
 
     try:
         count, jobs = await scrape_freelancer_rss(db)
@@ -1515,30 +1560,12 @@ async def scrape_all(db) -> Dict[str, object]:
     else:
         skipped.append("upwork (missing UPWORK_CLIENT_ID/SECRET/REFRESH_TOKEN)")
 
-    for key, runner in (
-        ("jobicy", scrape_jobicy),
-        ("remoteok", scrape_remoteok),
-        ("remotive", scrape_remotive),
-        ("weworkremotely", scrape_weworkremotely),
-        ("arbeitnow", scrape_arbeitnow),
-    ):
-        count, jobs = await _soft_scrape(key, runner(db))
-        results[key] = count
-        new_jobs.extend(jobs)
-
-    if adzuna_configured():
-        count, jobs = await _soft_scrape("adzuna", scrape_adzuna(db))
-        results["adzuna"] = count
-        new_jobs.extend(jobs)
-    else:
-        skipped.append("adzuna (missing ADZUNA_APP_ID/ADZUNA_APP_KEY)")
-
     if configured_extra_job_feeds():
         count, jobs = await _soft_scrape("extra_rss", scrape_extra_job_rss(db))
         results["extra_rss"] = count
         new_jobs.extend(jobs)
     else:
-        skipped.append("extra_rss (set JOB_RSS_URLS for Vollna/Vibeworker/custom)")
+        skipped.append("extra_rss (set JOB_RSS_URLS for Vollna/Vibeworker/custom freelance feeds)")
 
     results["total"] = sum(int(results[k] or 0) for k in source_keys)
     results["errors"] = errors
