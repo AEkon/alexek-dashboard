@@ -61,6 +61,12 @@ const SOURCE_META: Record<string, { short: string; title: string }> = {
   freelancer: { short: 'FL', title: 'Freelancer' },
   peopleperhour: { short: 'PPH', title: 'PeoplePerHour' },
   upwork: { short: 'UW', title: 'Upwork' },
+  jobicy: { short: 'JC', title: 'Jobicy' },
+  remoteok: { short: 'RO', title: 'Remote OK' },
+  remotive: { short: 'RM', title: 'Remotive' },
+  weworkremotely: { short: 'WW', title: 'We Work Remotely' },
+  arbeitnow: { short: 'AN', title: 'Arbeitnow' },
+  adzuna: { short: 'AD', title: 'Adzuna' },
 }
 
 function sourceMeta(source: string) {
@@ -410,7 +416,7 @@ export default function Jobs({ onInboxChange }: JobsProps) {
       <div className="section-divider">
         <h3 className="section-title">Job Opportunities</h3>
         <p className="section-description">
-          Squarespace gigs — generate a Freelancer proposal, bid amount, and delivery days when ready to bid
+          Squarespace listings from freelance and remote boards — generate a proposal pack when ready to bid
         </p>
       </div>
 

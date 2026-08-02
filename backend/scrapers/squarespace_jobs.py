@@ -1,9 +1,9 @@
 """Squarespace job scrapers.
 
 Callers: backend/main.py refresh_jobs_background → scrape().
-APIs: Freelancer RSS; optional Upwork GraphQL via env.
+APIs: Freelancer RSS; PPH; Jobicy; Remote OK; Remotive; WWR; Arbeitnow;
+      optional Upwork GraphQL, Adzuna, and JOB_RSS_URLS (Vollna/Vibeworker/custom).
 Schema: jobs (source, source_id, title, ...), scrape_log.
-User: "Implement the plan" (job triage + lean DB).
 """
 import feedparser
 import httpx
@@ -21,6 +21,26 @@ from notify import alert_min_score, notify_new_high_score_jobs
 
 USER_AGENT = "alexek-dashboard/1.0 (+https://hq.alexek.com)"
 DESCRIPTION_SNIPPET_LEN = 400
+
+# Employment/remote boards rarely have Freelancer-style project budgets.
+# When a listing clearly mentions Squarespace, still surface it at the alert floor.
+EMPLOYMENT_SOURCES = frozenset({
+    "jobicy",
+    "remoteok",
+    "remotive",
+    "weworkremotely",
+    "arbeitnow",
+    "adzuna",
+})
+
+WWR_RSS_URLS = [
+    "https://weworkremotely.com/categories/remote-design-jobs.rss",
+    "https://weworkremotely.com/categories/remote-programming-jobs.rss",
+    "https://weworkremotely.com/remote-full-time-jobs.rss",
+]
+
+JOBICY_SEARCH_TAGS = ["squarespace", "wordpress", "web-design", "design"]
+REMOTIVE_SEARCHES = ["squarespace", "wordpress designer"]
 
 PROPOSAL_SYSTEM = """You write Freelancer.com bids in first person as Alex — like a real freelancer messaging a client, not a marketing page.
 
@@ -227,6 +247,19 @@ def is_squarespace_job(title: str, description: str) -> bool:
     return "squarespace" in f"{title} {description}".lower()
 
 
+def is_squarespace_anti_mention(title: str, description: str) -> bool:
+    """True when SS appears only as an excluded/undesired platform (common on employment boards)."""
+    text = f"{title} {description}".lower()
+    if "squarespace" not in text:
+        return False
+    # e.g. "not wordpress/wix/squarespace" or "builders focused on simple wordpress/wix/squarespace sites"
+    if re.search(r"wordpress\s*/\s*wix\s*/\s*squarespace", text):
+        return True
+    if re.search(r"(?:no|not|avoid|exclude)[^\n.]{0,40}squarespace", text):
+        return True
+    return False
+
+
 def matched_keywords(title: str, description: str) -> str:
     combined = f"{title} {description}".lower()
     hits = [kw for kw in SQUARESPACE_KEYWORDS if kw.lower() in combined]
@@ -243,18 +276,35 @@ def clean_html(text: str) -> str:
 
 
 def parse_feed_date(published: str) -> str:
-    if not published:
+    if published is None or published == "":
         return datetime.utcnow().isoformat()
+    if isinstance(published, (int, float)):
+        try:
+            # Heuristic: ms vs seconds
+            ts = float(published)
+            if ts > 1e12:
+                ts /= 1000.0
+            return datetime.utcfromtimestamp(ts).isoformat()
+        except (OverflowError, OSError, ValueError):
+            return datetime.utcnow().isoformat()
+    published = str(published)
     for fmt in (
         "%a, %d %b %Y %H:%M:%S %z",
         "%a, %d %b %Y %H:%M:%S %Z",
         "%Y-%m-%dT%H:%M:%S%z",
         "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
     ):
         try:
             return datetime.strptime(published, fmt).isoformat()
         except ValueError:
             continue
+    # ISO with fractional seconds
+    try:
+        return datetime.fromisoformat(published.replace("Z", "+00:00")).replace(tzinfo=None).isoformat()
+    except ValueError:
+        pass
     return datetime.utcnow().isoformat()
 
 
@@ -458,6 +508,129 @@ def extract_rate(text: str) -> Optional[Dict[str, int]]:
     if not parsed:
         return None
     return {"rate_min": int(parsed["rate_min"]), "rate_max": int(parsed["rate_max"])}
+
+
+def parse_salary_mid_usd(text: str) -> Optional[int]:
+    """Rough annual/hourly salary mid → USD for ranking employment listings."""
+    if not text:
+        return None
+    # $90 - $150 /hour  or  $90-$150/hr
+    hourly = re.search(
+        r"([$£€])\s*([\d,]+(?:\.\d+)?)\s*[-–—to]+\s*([$£€]?)\s*([\d,]+(?:\.\d+)?)\s*/?\s*(?:hour|hr|h)\b",
+        text,
+        re.I,
+    )
+    if hourly:
+        sym = hourly.group(1) or hourly.group(3) or "$"
+        lo = float(hourly.group(2).replace(",", ""))
+        hi = float(hourly.group(4).replace(",", ""))
+        mid = (lo + hi) / 2.0
+        # Treat ~40h week × 2 weeks as a comparable “project” mid for ranking
+        fx = {"$": 1.0, "£": 1.27, "€": 1.08}.get(sym, 1.0)
+        return int(mid * fx * 80)
+
+    # $80,000 - $100,000 or 80k-100k
+    annual = re.search(
+        r"([$£€])?\s*([\d,]+)\s*([kK])?\s*[-–—to]+\s*([$£€])?\s*([\d,]+)\s*([kK])?",
+        text,
+    )
+    if annual:
+        lo = float(annual.group(2).replace(",", ""))
+        hi = float(annual.group(5).replace(",", ""))
+        if annual.group(3):
+            lo *= 1000
+        if annual.group(6):
+            hi *= 1000
+        if lo < 1000 and hi < 1000:
+            return None  # likely not salary
+        mid = (lo + hi) / 2.0
+        sym = annual.group(1) or annual.group(4) or "$"
+        fx = {"$": 1.0, "£": 1.27, "€": 1.08}.get(sym, 1.0)
+        # Monthly slice for priority ranking
+        return int(mid * fx / 12.0)
+
+    single = re.search(r"([$£€])\s*([\d,]+)\s*([kK])?\s*(?:/?\s*(?:year|yr|annum))?", text, re.I)
+    if single:
+        val = float(single.group(2).replace(",", ""))
+        if single.group(3):
+            val *= 1000
+        if val < 5000:
+            return None
+        fx = {"$": 1.0, "£": 1.27, "€": 1.08}.get(single.group(1), 1.0)
+        return int(val * fx / 12.0)
+    return None
+
+
+def persist_squarespace_listing(
+    db,
+    *,
+    source: str,
+    source_id: str,
+    title: str,
+    description: str,
+    url: str,
+    posted_date: str,
+    outcome_mults: Dict[str, float],
+    allow_unbudgeted: bool = False,
+) -> Tuple[str, Optional[dict]]:
+    """
+    Shared upsert path for all job sources.
+    Returns (action, new_job_dict) where action is inserted|updated|noop|skip.
+    """
+    if not title or not url or not source_id:
+        return "skip", None
+    if not is_squarespace_job(title, description):
+        return "skip", None
+    if allow_unbudgeted and is_squarespace_anti_mention(title, description):
+        return "skip", None
+
+    budget_info = parse_budget(f"{title} {description}")
+    effort = estimate_effort(title, description)
+    mid_usd = int(budget_info["budget_mid_usd"]) if budget_info else None
+    if mid_usd is None and allow_unbudgeted:
+        mid_usd = parse_salary_mid_usd(f"{title} {description}")
+
+    keywords = matched_keywords(title, description)
+    kind = detect_job_kind(title, description, keywords)
+    priority = compute_priority(mid_usd, effort, outcome_mults.get(kind, 1.0))
+    if priority is None and allow_unbudgeted and source in EMPLOYMENT_SOURCES:
+        # Surface rare SS hits from employment boards even without parseable pay
+        priority = float(alert_min_score())
+    if not meets_min_score(priority):
+        return "skip", None
+
+    job_type = "short-term" if is_short_term_job(title, description) or effort <= 3 else "unknown"
+    if allow_unbudgeted and source in EMPLOYMENT_SOURCES and not is_short_term_job(title, description):
+        job_type = "employment"
+
+    action = upsert_job(
+        db,
+        source=source,
+        source_id=str(source_id)[:120],
+        title=title,
+        description=description,
+        url=url,
+        posted_date=posted_date or datetime.utcnow().isoformat(),
+        job_type=job_type,
+        keyword_matches=keywords,
+        rate_min=int(budget_info["rate_min"]) if budget_info else None,
+        rate_max=int(budget_info["rate_max"]) if budget_info else None,
+        currency=str(budget_info["currency"]) if budget_info else "USD",
+        budget=str(budget_info["budget"]) if budget_info else None,
+        budget_mid_usd=mid_usd,
+        effort_score=effort,
+        priority_score=priority,
+    )
+    new_job = None
+    if action == "inserted":
+        new_job = {
+            "title": title,
+            "url": url,
+            "budget": str(budget_info["budget"]) if budget_info else None,
+            "priority_score": priority,
+            "source": source,
+        }
+    return action, new_job
 
 
 def upsert_job(
@@ -893,17 +1066,407 @@ async def scrape_upwork_graphql(db):
     return rows, new_jobs
 
 
+async def _soft_scrape(name: str, coro) -> Tuple[int, List[dict]]:
+    """Never raise — soft-optional sources return (0, []) on failure."""
+    try:
+        return await coro
+    except Exception as e:
+        print(f"{name} soft-skip: {e}")
+        return 0, []
+
+
+async def scrape_jobicy(db):
+    """Jobicy remote jobs API (free; credit Jobicy). Soft-optional."""
+    outcome_mults = load_outcome_kind_multipliers(db)
+    rows = 0
+    new_jobs: List[dict] = []
+    seen: set = set()
+    async with httpx.AsyncClient(timeout=25, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
+        for tag in JOBICY_SEARCH_TAGS:
+            resp = await client.get(
+                "https://jobicy.com/api/v2/remote-jobs",
+                params={"count": 50, "tag": tag},
+            )
+            if resp.status_code != 200:
+                continue
+            for job in resp.json().get("jobs") or []:
+                job_id = str(job.get("id") or job.get("jobSlug") or "")
+                if not job_id or job_id in seen:
+                    continue
+                seen.add(job_id)
+                title = clean_html(job.get("jobTitle") or "")
+                description = clean_html(
+                    (job.get("jobDescription") or "") + " " + (job.get("jobExcerpt") or "")
+                )
+                # Enrich description with salary fields for ranking
+                sal_bits = []
+                if job.get("salaryMin"):
+                    sal_bits.append(str(job["salaryMin"]))
+                if job.get("salaryMax"):
+                    sal_bits.append(str(job["salaryMax"]))
+                if sal_bits:
+                    description += f" Salary: {'-'.join(sal_bits)} {job.get('salaryCurrency') or 'USD'}"
+                url = job.get("url") or ""
+                posted = parse_feed_date(job.get("pubDate") or "")
+                action, new_job = persist_squarespace_listing(
+                    db,
+                    source="jobicy",
+                    source_id=job_id,
+                    title=title,
+                    description=description,
+                    url=url,
+                    posted_date=posted,
+                    outcome_mults=outcome_mults,
+                    allow_unbudgeted=True,
+                )
+                if action not in ("skip", "noop"):
+                    rows += 1
+                if new_job:
+                    new_jobs.append(new_job)
+    db.commit()
+    return rows, new_jobs
+
+
+async def scrape_remoteok(db):
+    """Remote OK public JSON API (free; link back to Remote OK). Soft-optional."""
+    outcome_mults = load_outcome_kind_multipliers(db)
+    rows = 0
+    new_jobs: List[dict] = []
+    async with httpx.AsyncClient(timeout=25, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
+        resp = await client.get("https://remoteok.com/api")
+        if resp.status_code != 200:
+            return 0, []
+        payload = resp.json()
+        if not isinstance(payload, list):
+            return 0, []
+        for job in payload:
+            if not isinstance(job, dict) or not job.get("id") or not job.get("position"):
+                continue
+            title = clean_html(job.get("position") or "")
+            description = clean_html(job.get("description") or "")
+            tags = " ".join(job.get("tags") or []) if isinstance(job.get("tags"), list) else ""
+            description = f"{description} {tags}".strip()
+            smin = job.get("salary_min") or 0
+            smax = job.get("salary_max") or 0
+            if smin or smax:
+                description += f" Salary: ${smin} - ${smax}"
+            url = job.get("url") or job.get("apply_url") or ""
+            if url and not url.startswith("http"):
+                url = f"https://remoteOK.com{url}"
+            posted = parse_feed_date(job.get("date") or "")
+            action, new_job = persist_squarespace_listing(
+                db,
+                source="remoteok",
+                source_id=str(job["id"]),
+                title=title,
+                description=description,
+                url=url,
+                posted_date=posted,
+                outcome_mults=outcome_mults,
+                allow_unbudgeted=True,
+            )
+            if action not in ("skip", "noop"):
+                rows += 1
+            if new_job:
+                new_jobs.append(new_job)
+    db.commit()
+    return rows, new_jobs
+
+
+async def scrape_remotive(db):
+    """Remotive API (free; 24h delay; credit Remotive). Soft-optional."""
+    outcome_mults = load_outcome_kind_multipliers(db)
+    rows = 0
+    new_jobs: List[dict] = []
+    seen: set = set()
+    async with httpx.AsyncClient(timeout=25, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
+        for query in REMOTIVE_SEARCHES:
+            resp = await client.get(
+                "https://remotive.com/api/remote-jobs",
+                params={"search": query},
+            )
+            if resp.status_code != 200:
+                continue
+            for job in resp.json().get("jobs") or []:
+                job_id = str(job.get("id") or "")
+                if not job_id or job_id in seen:
+                    continue
+                seen.add(job_id)
+                title = clean_html(job.get("title") or "")
+                description = clean_html(job.get("description") or "")
+                tags = " ".join(job.get("tags") or []) if isinstance(job.get("tags"), list) else ""
+                description = f"{description} {tags}".strip()
+                if job.get("salary"):
+                    description += f" Salary: {job['salary']}"
+                action, new_job = persist_squarespace_listing(
+                    db,
+                    source="remotive",
+                    source_id=job_id,
+                    title=title,
+                    description=description,
+                    url=job.get("url") or "",
+                    posted_date=parse_feed_date(job.get("publication_date") or ""),
+                    outcome_mults=outcome_mults,
+                    allow_unbudgeted=True,
+                )
+                if action not in ("skip", "noop"):
+                    rows += 1
+                if new_job:
+                    new_jobs.append(new_job)
+    db.commit()
+    return rows, new_jobs
+
+
+async def scrape_weworkremotely(db):
+    """We Work Remotely category RSS feeds. Soft-optional."""
+    outcome_mults = load_outcome_kind_multipliers(db)
+    rows = 0
+    new_jobs: List[dict] = []
+    seen: set = set()
+    async with httpx.AsyncClient(timeout=25, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
+        for feed_url in WWR_RSS_URLS:
+            try:
+                resp = await client.get(feed_url)
+            except Exception:
+                continue
+            if resp.status_code != 200:
+                continue
+            feed = feedparser.parse(resp.content)
+            for entry in feed.entries[:60]:
+                title = clean_html(entry.get("title", ""))
+                description = clean_html(entry.get("summary") or entry.get("description", ""))
+                link = entry.get("link", "")
+                source_id = re.sub(r"[^\w-]", "", link.rstrip("/").split("/")[-1])[:80] or link[-50:]
+                if not source_id or source_id in seen:
+                    continue
+                seen.add(source_id)
+                action, new_job = persist_squarespace_listing(
+                    db,
+                    source="weworkremotely",
+                    source_id=source_id,
+                    title=title,
+                    description=description,
+                    url=link,
+                    posted_date=parse_feed_date(entry.get("published") or entry.get("updated") or ""),
+                    outcome_mults=outcome_mults,
+                    allow_unbudgeted=True,
+                )
+                if action not in ("skip", "noop"):
+                    rows += 1
+                if new_job:
+                    new_jobs.append(new_job)
+    db.commit()
+    return rows, new_jobs
+
+
+async def scrape_arbeitnow(db):
+    """Arbeitnow EU/remote job board API (free). Soft-optional."""
+    outcome_mults = load_outcome_kind_multipliers(db)
+    rows = 0
+    new_jobs: List[dict] = []
+    async with httpx.AsyncClient(timeout=25, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
+        resp = await client.get("https://www.arbeitnow.com/api/job-board-api")
+        if resp.status_code != 200:
+            return 0, []
+        for job in resp.json().get("data") or []:
+            title = clean_html(job.get("title") or "")
+            description = clean_html(job.get("description") or "")
+            tags = " ".join(job.get("tags") or []) if isinstance(job.get("tags"), list) else ""
+            description = f"{description} {tags}".strip()
+            slug = job.get("slug") or ""
+            url = job.get("url") or (f"https://www.arbeitnow.com/view/{slug}" if slug else "")
+            posted = parse_feed_date(job.get("created_at") or "")
+            action, new_job = persist_squarespace_listing(
+                db,
+                source="arbeitnow",
+                source_id=slug or url[-50:],
+                title=title,
+                description=description,
+                url=url,
+                posted_date=posted,
+                outcome_mults=outcome_mults,
+                allow_unbudgeted=True,
+            )
+            if action not in ("skip", "noop"):
+                rows += 1
+            if new_job:
+                new_jobs.append(new_job)
+    db.commit()
+    return rows, new_jobs
+
+
+def adzuna_configured() -> bool:
+    return bool(os.getenv("ADZUNA_APP_ID") and os.getenv("ADZUNA_APP_KEY"))
+
+
+async def scrape_adzuna(db):
+    """Adzuna Jobs API when ADZUNA_APP_ID + ADZUNA_APP_KEY are set. Soft-optional."""
+    if not adzuna_configured():
+        return 0, []
+    app_id = os.environ["ADZUNA_APP_ID"]
+    app_key = os.environ["ADZUNA_APP_KEY"]
+    countries = [c.strip() for c in os.getenv("ADZUNA_COUNTRIES", "gb,us").split(",") if c.strip()]
+    outcome_mults = load_outcome_kind_multipliers(db)
+    rows = 0
+    new_jobs: List[dict] = []
+    seen: set = set()
+    fetched = 0
+    skipped_no_ss = 0
+    # Phrase + keyword searches — fuzzy "what" often returns unrelated web jobs
+    # whose snippets never contain "squarespace", which we then correctly drop.
+    queries = [
+        {"what_phrase": "squarespace"},
+        {"what": "squarespace"},
+        {"what": "squarespace designer"},
+        {"what": "squarespace developer"},
+    ]
+    async with httpx.AsyncClient(timeout=25, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
+        for country in countries:
+            for query in queries:
+                resp = await client.get(
+                    f"https://api.adzuna.com/v1/api/jobs/{country}/search/1",
+                    params={
+                        "app_id": app_id,
+                        "app_key": app_key,
+                        "results_per_page": 50,
+                        "content-type": "application/json",
+                        **query,
+                    },
+                )
+                if resp.status_code != 200:
+                    print(f"Adzuna {country} {query}: HTTP {resp.status_code} {resp.text[:160]}")
+                    continue
+                results = resp.json().get("results") or []
+                print(f"Adzuna {country} {query}: {len(results)} result(s)")
+                for job in results:
+                    job_id = str(job.get("id") or "")
+                    if not job_id or job_id in seen:
+                        continue
+                    seen.add(job_id)
+                    fetched += 1
+                    title = clean_html(job.get("title") or "")
+                    description = clean_html(job.get("description") or "")
+                    company = clean_html((job.get("company") or {}).get("display_name") or "")
+                    if company:
+                        description = f"{description} Company: {company}".strip()
+                    if job.get("salary_min") or job.get("salary_max"):
+                        description += (
+                            f" Salary: {job.get('salary_min')} - {job.get('salary_max')} "
+                            f"{job.get('salary_currency') or ''}"
+                        )
+                    if "squarespace" not in f"{title} {description}".lower():
+                        skipped_no_ss += 1
+                        continue
+                    action, new_job = persist_squarespace_listing(
+                        db,
+                        source="adzuna",
+                        source_id=job_id,
+                        title=title,
+                        description=description,
+                        url=job.get("redirect_url") or job.get("url") or "",
+                        posted_date=parse_feed_date(job.get("created") or ""),
+                        outcome_mults=outcome_mults,
+                        allow_unbudgeted=True,
+                    )
+                    if action not in ("skip", "noop"):
+                        rows += 1
+                    if new_job:
+                        new_jobs.append(new_job)
+    print(
+        f"Adzuna summary: unique={fetched} kept_rows={rows} "
+        f"skipped_no_squarespace_in_text={skipped_no_ss} inserted_alerts={len(new_jobs)}"
+    )
+    db.commit()
+    return rows, new_jobs
+
+
+def configured_extra_job_feeds() -> List[Tuple[str, str]]:
+    """
+    JOB_RSS_URLS=source|url,source|url — e.g. Vollna / Vibeworker / custom RSS.
+    """
+    multi = os.getenv("JOB_RSS_URLS", "").strip()
+    if not multi:
+        return []
+    feeds = []
+    for part in multi.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "|" in part:
+            source, url = part.split("|", 1)
+            feeds.append((re.sub(r"[^\w-]", "_", source.strip().lower())[:40] or "custom", url.strip()))
+        else:
+            feeds.append(("custom_rss", part))
+    return feeds
+
+
+async def scrape_extra_job_rss(db):
+    """Optional paid/custom RSS (Vollna, Vibeworker, etc.) via JOB_RSS_URLS."""
+    feeds = configured_extra_job_feeds()
+    if not feeds:
+        return 0, []
+    outcome_mults = load_outcome_kind_multipliers(db)
+    rows = 0
+    new_jobs: List[dict] = []
+    seen: set = set()
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
+        for source, feed_url in feeds:
+            try:
+                resp = await client.get(feed_url)
+            except Exception as e:
+                print(f"Extra job RSS {source}: {e}")
+                continue
+            if resp.status_code != 200:
+                print(f"Extra job RSS {source}: HTTP {resp.status_code}")
+                continue
+            feed = feedparser.parse(resp.content)
+            for entry in feed.entries[:80]:
+                title = clean_html(entry.get("title", ""))
+                description = clean_html(entry.get("summary") or entry.get("description", ""))
+                link = entry.get("link", "")
+                source_id = str(entry.get("id") or entry.get("guid") or link)[-80:]
+                key = f"{source}:{source_id}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                action, new_job = persist_squarespace_listing(
+                    db,
+                    source=source,
+                    source_id=source_id,
+                    title=title,
+                    description=description,
+                    url=link,
+                    posted_date=parse_feed_date(entry.get("published") or entry.get("updated") or ""),
+                    outcome_mults=outcome_mults,
+                    allow_unbudgeted=True,
+                )
+                if action not in ("skip", "noop"):
+                    rows += 1
+                if new_job:
+                    new_jobs.append(new_job)
+    db.commit()
+    return rows, new_jobs
+
+
 async def scrape_all(db) -> Dict[str, object]:
     """Run configured sources independently; collect counts, new jobs, and errors."""
-    results: Dict[str, object] = {
-        "freelancer": 0,
-        "peopleperhour": 0,
-        "upwork": 0,
-        "total": 0,
-        "errors": [],
-        "skipped": [],
-        "new_jobs": [],
-    }
+    source_keys = [
+        "freelancer",
+        "peopleperhour",
+        "upwork",
+        "jobicy",
+        "remoteok",
+        "remotive",
+        "weworkremotely",
+        "arbeitnow",
+        "adzuna",
+        "extra_rss",
+    ]
+    results: Dict[str, object] = {k: 0 for k in source_keys}
+    results["total"] = 0
+    results["errors"] = []
+    results["skipped"] = []
+    results["new_jobs"] = []
     errors: List[str] = []
     new_jobs: List[dict] = []
     skipped: List[str] = []
@@ -917,12 +1480,9 @@ async def scrape_all(db) -> Dict[str, object]:
         errors.append(msg)
         print(f"Scraping error: {msg}")
 
-    try:
-        count, jobs = await scrape_peopleperhour_rss(db)
-        results["peopleperhour"] = count
-        new_jobs.extend(jobs)
-    except Exception as e:
-        print(f"PeoplePerHour soft-skip: {e}")
+    count, jobs = await _soft_scrape("PeoplePerHour", scrape_peopleperhour_rss(db))
+    results["peopleperhour"] = count
+    new_jobs.extend(jobs)
 
     if upwork_configured():
         try:
@@ -936,11 +1496,32 @@ async def scrape_all(db) -> Dict[str, object]:
     else:
         skipped.append("upwork (missing UPWORK_CLIENT_ID/SECRET/REFRESH_TOKEN)")
 
-    results["total"] = (
-        int(results["freelancer"] or 0)
-        + int(results["peopleperhour"] or 0)
-        + int(results["upwork"] or 0)
-    )
+    for key, runner in (
+        ("jobicy", scrape_jobicy),
+        ("remoteok", scrape_remoteok),
+        ("remotive", scrape_remotive),
+        ("weworkremotely", scrape_weworkremotely),
+        ("arbeitnow", scrape_arbeitnow),
+    ):
+        count, jobs = await _soft_scrape(key, runner(db))
+        results[key] = count
+        new_jobs.extend(jobs)
+
+    if adzuna_configured():
+        count, jobs = await _soft_scrape("adzuna", scrape_adzuna(db))
+        results["adzuna"] = count
+        new_jobs.extend(jobs)
+    else:
+        skipped.append("adzuna (missing ADZUNA_APP_ID/ADZUNA_APP_KEY)")
+
+    if configured_extra_job_feeds():
+        count, jobs = await _soft_scrape("extra_rss", scrape_extra_job_rss(db))
+        results["extra_rss"] = count
+        new_jobs.extend(jobs)
+    else:
+        skipped.append("extra_rss (set JOB_RSS_URLS for Vollna/Vibeworker/custom)")
+
+    results["total"] = sum(int(results[k] or 0) for k in source_keys)
     results["errors"] = errors
     results["skipped"] = skipped
     results["new_jobs"] = new_jobs

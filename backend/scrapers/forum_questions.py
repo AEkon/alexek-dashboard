@@ -4,9 +4,10 @@ Monitors multiple sources for Squarespace CSS/JS questions and generates
 AI-powered answer suggestions using Groq API (free tier).
 
 Callers: backend/main.py refresh_forum_background → scrape()
-APIs: Stack Exchange API, Squarespace forum RSS feeds, Groq API
+APIs: Stack Exchange (SO/Webmasters/SU), Squarespace forum RSS, Reddit, HN Algolia, optional Discourse RSS, Groq API
 Schema: forum_questions (source, source_id, title, ai_answer, status, ...)
 """
+import asyncio
 import re
 import httpx
 import feedparser
@@ -48,7 +49,37 @@ DEFAULT_SQUARESPACE_FEEDS = [
 
 REDDIT_FEEDS = [
     ("reddit_squarespace", "https://www.reddit.com/r/squarespace/new/.rss"),
+    ("reddit_squarespace_help", "https://www.reddit.com/r/SquarespaceHelp/new/.rss"),
+    # Broader design sub — still keyword-filtered in ingest
+    ("reddit_web_design", "https://www.reddit.com/r/web_design/new/.rss"),
 ]
+
+# Stack Exchange sites that get occasional Squarespace questions
+STACK_EXCHANGE_SITES = [
+    ("stackoverflow", "stackoverflow"),
+    ("webmasters", "webmasters"),
+    ("superuser", "superuser"),
+]
+
+STACK_EXCHANGE_TAGS = ["squarespace", "squarespace;css", "squarespace;javascript"]
+
+
+def configured_discourse_feeds() -> List[Tuple[str, str]]:
+    """DISCOURSE_RSS_URLS=source|url,source|url for any Discourse forum RSS."""
+    multi = os.getenv("DISCOURSE_RSS_URLS", "").strip()
+    if not multi:
+        return []
+    feeds = []
+    for part in multi.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "|" in part:
+            source, url = part.split("|", 1)
+            feeds.append((source.strip(), url.strip()))
+        else:
+            feeds.append(("discourse", part))
+    return feeds
 
 
 def configured_squarespace_feeds() -> List[Tuple[str, str]]:
@@ -310,6 +341,7 @@ async def ingest_rss_feed(
     rss_url: str,
     cutoff_time: datetime,
     require_keyword: bool = True,
+    require_squarespace: bool = False,
 ) -> Tuple[int, int, List[Dict]]:
     """Fetch one RSS/Atom feed and upsert matching questions."""
     rows = 0
@@ -353,6 +385,8 @@ async def ingest_rss_feed(
             if not title or not link:
                 continue
             if not is_forum_question(title, description, require_keyword=require_keyword):
+                continue
+            if require_squarespace and "squarespace" not in f"{title} {description}".lower():
                 continue
 
             source_id = re.sub(r"[^\w-]", "", link.rstrip("/").split("/")[-1])[:80] or link[-50:]
@@ -412,13 +446,44 @@ async def scrape_squarespace_rss(db, client: httpx.AsyncClient, cutoff_time: dat
 
 
 async def scrape_reddit(db, client: httpx.AsyncClient, cutoff_time: datetime) -> Tuple[int, int, List[Dict]]:
-    """Scrape Reddit Squarespace new posts via public RSS."""
+    """Scrape Reddit Squarespace (+ related) new posts via public RSS."""
     rows = 0
     new_questions = 0
     new_for_alert: List[Dict] = []
-    for source, url in REDDIT_FEEDS:
+    for i, (source, url) in enumerate(REDDIT_FEEDS):
+        if i:
+            await asyncio.sleep(1.5)  # Reddit rate-limits aggressive RSS polling
+        # Non-SS-dedicated subs must mention Squarespace or they drown the inbox
+        need_ss = source not in ("reddit_squarespace", "reddit_squarespace_help")
         r, n, alerts = await ingest_rss_feed(
-            db, client, source=source, rss_url=url, cutoff_time=cutoff_time, require_keyword=True
+            db,
+            client,
+            source=source,
+            rss_url=url,
+            cutoff_time=cutoff_time,
+            require_keyword=True,
+            require_squarespace=need_ss,
+        )
+        rows += r
+        new_questions += n
+        new_for_alert.extend(alerts)
+    return rows, new_questions, new_for_alert
+
+
+async def scrape_discourse(db, client: httpx.AsyncClient, cutoff_time: datetime) -> Tuple[int, int, List[Dict]]:
+    """Optional Discourse forum RSS via DISCOURSE_RSS_URLS."""
+    rows = 0
+    new_questions = 0
+    new_for_alert: List[Dict] = []
+    for source, url in configured_discourse_feeds():
+        r, n, alerts = await ingest_rss_feed(
+            db,
+            client,
+            source=source,
+            rss_url=url,
+            cutoff_time=cutoff_time,
+            require_keyword=True,
+            require_squarespace=True,
         )
         rows += r
         new_questions += n
@@ -427,110 +492,184 @@ async def scrape_reddit(db, client: httpx.AsyncClient, cutoff_time: datetime) ->
 
 
 async def scrape_stackoverflow(db, client: httpx.AsyncClient, cutoff_time: datetime) -> Tuple[int, int, List[Dict]]:
-    """Scrape Stack Overflow for Squarespace CSS/JS questions. Returns (rows, new_questions, new_questions_for_alert)."""
+    """Scrape Stack Exchange sites for unanswered Squarespace questions."""
     rows = 0
     new_questions = 0
     new_questions_for_alert = []
-
-    # Only Squarespace-tagged questions (optionally AND css / javascript).
-    # Bare css/javascript tags drown the feed in unrelated SO noise.
-    search_tags = ['squarespace', 'squarespace;css', 'squarespace;javascript']
+    seen: set = set()
+    fromdate = int((datetime.now(timezone.utc) - timedelta(hours=24)).timestamp())
 
     try:
-        for tag in search_tags:
-            print(f"🔍 Searching Stack Overflow for: {tag}")
-
-            api_url = f"https://api.stackexchange.com/2.3/questions"
-            params = {
-                'order': 'desc',
-                'sort': 'creation',
-                'tagged': tag,
-                'site': 'stackoverflow',
-                'filter': 'withbody',
-                'pagesize': 50,
-                'fromdate': int((datetime.now(timezone.utc) - timedelta(hours=24)).timestamp()),
-            }
-
-            try:
-                resp = await client.get(api_url, params=params, timeout=30)
-                if resp.status_code != 200:
-                    print(f"Failed to fetch Stack Overflow: HTTP {resp.status_code}")
-                    continue
-
-                data = resp.json()
-                questions = data.get('items', [])
-
-                print(f"Found {len(questions)} questions for tag: {tag}")
-
-                for question in questions:
-                    title = question.get('title', '')
-                    body = question.get('body', '')
-                    question_id = question.get('question_id')
-                    creation_date = question.get('creation_date')
-                    answer_count = question.get('answer_count', 0)
-                    is_answered = question.get('is_answered', False)
-
-                    # Skip if already has answers (we want unanswered questions)
-                    if answer_count > 0 or is_answered:
+        for source_key, site in STACK_EXCHANGE_SITES:
+            for tag in STACK_EXCHANGE_TAGS:
+                print(f"🔍 Searching {site} for: {tag}")
+                params = {
+                    "order": "desc",
+                    "sort": "creation",
+                    "tagged": tag,
+                    "site": site,
+                    "filter": "withbody",
+                    "pagesize": 50,
+                    "fromdate": fromdate,
+                }
+                try:
+                    resp = await client.get(
+                        "https://api.stackexchange.com/2.3/questions",
+                        params=params,
+                        timeout=30,
+                    )
+                    if resp.status_code != 200:
+                        print(f"Failed {site}: HTTP {resp.status_code}")
                         continue
 
-                    # Clean HTML from body
-                    description = clean_html(body)
+                    questions = resp.json().get("items", [])
+                    print(f"Found {len(questions)} questions on {site} for tag: {tag}")
 
-                    # Check if this is CSS/JS/design related
-                    if not is_forum_question(title, description):
-                        continue
-
-                    # 24-hour retention policy: skip if older than 24 hours
-                    if creation_date:
-                        created_dt = datetime.fromtimestamp(creation_date, tz=timezone.utc)
-                        twenty_four_hours_ago = datetime.now(timezone.utc) - timedelta(hours=24)
-                        if created_dt < twenty_four_hours_ago:
-                            print(f"⏭️ Skipping Stack Overflow question older than 24h: {title[:30]}...")
+                    for question in questions:
+                        title = question.get("title", "")
+                        body = question.get("body", "")
+                        question_id = question.get("question_id")
+                        creation_date = question.get("creation_date")
+                        answer_count = question.get("answer_count", 0)
+                        is_answered = question.get("is_answered", False)
+                        if answer_count > 0 or is_answered:
                             continue
 
-                    source_id = str(question_id)
+                        description = clean_html(body)
+                        if not is_forum_question(title, description):
+                            continue
 
-                    existing = db.execute(
-                        "SELECT id FROM forum_questions WHERE source = ? AND source_id = ?",
-                        ("stackoverflow", source_id)
-                    ).fetchone()
+                        if creation_date:
+                            created_dt = datetime.fromtimestamp(creation_date, tz=timezone.utc)
+                            if created_dt < datetime.now(timezone.utc) - timedelta(hours=24):
+                                continue
 
-                    if existing:
-                        rows += 1
-                        continue
+                        source_id = str(question_id)
+                        dedupe = f"{source_key}:{source_id}"
+                        if dedupe in seen:
+                            continue
+                        seen.add(dedupe)
 
-                    # Build question data (AI answers are generated on demand from the UI)
-                    question_data = {
-                        "source": "stackoverflow",
-                        "source_id": source_id,
-                        "title": title,
-                        "description": description[:1000],  # Limit description length
-                        "url": f"https://stackoverflow.com/questions/{question_id}",
-                        "comments_count": answer_count,
-                        "created_at": datetime.fromtimestamp(creation_date, tz=timezone.utc).isoformat() if creation_date else datetime.now(timezone.utc).isoformat()
-                    }
+                        existing = db.execute(
+                            "SELECT id FROM forum_questions WHERE source = ? AND source_id = ?",
+                            (source_key, source_id),
+                        ).fetchone()
+                        if existing:
+                            rows += 1
+                            continue
 
-                    status = await upsert_question(db, question_data)
-                    if status == "inserted":
-                        new_questions += 1
-                        new_questions_for_alert.append({
+                        link = question.get("link") or f"https://{site}.com/questions/{question_id}"
+                        if site == "stackoverflow":
+                            link = f"https://stackoverflow.com/questions/{question_id}"
+                        elif site == "webmasters":
+                            link = f"https://webmasters.stackexchange.com/questions/{question_id}"
+                        elif site == "superuser":
+                            link = f"https://superuser.com/questions/{question_id}"
+
+                        question_data = {
+                            "source": source_key,
+                            "source_id": source_id,
                             "title": title,
-                            "url": f"https://stackoverflow.com/questions/{question_id}",
-                            "description": description[:200],
-                            "ai_answer": question_data.get("ai_answer"),
-                            "source": "stackoverflow"
-                        })
-                    rows += 1
-
-            except Exception as e:
-                print(f"Error scraping Stack Overflow for tag {tag}: {e}")
-                continue
-
+                            "description": description[:1000],
+                            "url": link,
+                            "comments_count": answer_count,
+                            "created_at": (
+                                datetime.fromtimestamp(creation_date, tz=timezone.utc).isoformat()
+                                if creation_date
+                                else datetime.now(timezone.utc).isoformat()
+                            ),
+                        }
+                        status = await upsert_question(db, question_data)
+                        if status == "inserted":
+                            new_questions += 1
+                            new_questions_for_alert.append({
+                                "title": title,
+                                "url": link,
+                                "description": description[:200],
+                                "ai_answer": None,
+                                "source": source_key,
+                            })
+                        rows += 1
+                except Exception as e:
+                    print(f"Error scraping {site} for tag {tag}: {e}")
+                    continue
     except Exception as e:
-        print(f"Error in Stack Overflow scraping: {e}")
+        print(f"Error in Stack Exchange scraping: {e}")
 
     return rows, new_questions, new_questions_for_alert
+
+
+async def scrape_hackernews(db, client: httpx.AsyncClient, cutoff_time: datetime) -> Tuple[int, int, List[Dict]]:
+    """HN Algolia search for recent Squarespace Ask HN / stories. Soft-optional."""
+    rows = 0
+    new_questions = 0
+    new_for_alert: List[Dict] = []
+    twenty_four_hours_ago = datetime.now(timezone.utc) - timedelta(hours=24)
+    try:
+        resp = await client.get(
+            "https://hn.algolia.com/api/v1/search_by_date",
+            params={
+                "query": "squarespace",
+                "tags": "(story,ask_hn)",
+                "hitsPerPage": 30,
+            },
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            return 0, 0, []
+        for hit in resp.json().get("hits") or []:
+            title = clean_html(hit.get("title") or "")
+            description = clean_html(hit.get("story_text") or hit.get("comment_text") or "")
+            object_id = str(hit.get("objectID") or "")
+            url = hit.get("url") or f"https://news.ycombinator.com/item?id={object_id}"
+            created = hit.get("created_at")
+            if not title or not object_id:
+                continue
+            if "squarespace" not in f"{title} {description}".lower():
+                continue
+            if not is_forum_question(title, description, require_keyword=True):
+                continue
+            try:
+                created_dt = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                if created_dt < twenty_four_hours_ago:
+                    continue
+            except Exception:
+                created_dt = datetime.now(timezone.utc)
+
+            existing = db.execute(
+                "SELECT id FROM forum_questions WHERE source = ? AND source_id = ?",
+                ("hackernews", object_id),
+            ).fetchone()
+            if existing:
+                rows += 1
+                continue
+
+            question_data = {
+                "source": "hackernews",
+                "source_id": object_id,
+                "title": title,
+                "description": description[:1000],
+                "url": url if url.startswith("http") else f"https://news.ycombinator.com/item?id={object_id}",
+                "comments_count": int(hit.get("num_comments") or 0),
+                "created_at": created_dt.isoformat(),
+            }
+            status = await upsert_question(db, question_data)
+            if status == "inserted":
+                new_questions += 1
+                new_for_alert.append({
+                    "title": title,
+                    "url": question_data["url"],
+                    "description": description[:200],
+                    "ai_answer": None,
+                    "source": "hackernews",
+                })
+            rows += 1
+    except Exception as e:
+        print(f"HN soft-skip: {e}")
+    return rows, new_questions, new_for_alert
+
 
 def format_forum_alert(question: Dict) -> str:
     """Format a forum question for WhatsApp alert."""
@@ -645,11 +784,14 @@ async def scrape(db) -> Dict[str, object]:
         "squarespace_forum": 0,
         "reddit": 0,
         "stackoverflow": 0,
+        "discourse": 0,
+        "hackernews": 0,
         "total_questions": 0,
         "new_questions": 0,
         "status": "running",
         "errors": [],
         "feeds": [url for _, url in configured_squarespace_feeds()],
+        "discourse_feeds": [url for _, url in configured_discourse_feeds()],
     }
 
     all_new_questions = []  # Collect all new questions for alerts
@@ -693,6 +835,29 @@ async def scrape(db) -> Dict[str, object]:
                 all_new_questions.extend(new_for_alert)
             except Exception as scrape_error:
                 error_msg = f"Stack Overflow scraping failed: {str(scrape_error)}"
+                results["errors"].append(error_msg)
+                print(error_msg)
+
+            if configured_discourse_feeds():
+                try:
+                    count, new_q, new_for_alert = await scrape_discourse(db, client, cutoff_time)
+                    results["discourse"] = count
+                    results["total_questions"] += count
+                    results["new_questions"] += new_q
+                    all_new_questions.extend(new_for_alert)
+                except Exception as scrape_error:
+                    error_msg = f"Discourse scraping failed: {str(scrape_error)}"
+                    results["errors"].append(error_msg)
+                    print(error_msg)
+
+            try:
+                count, new_q, new_for_alert = await scrape_hackernews(db, client, cutoff_time)
+                results["hackernews"] = count
+                results["total_questions"] += count
+                results["new_questions"] += new_q
+                all_new_questions.extend(new_for_alert)
+            except Exception as scrape_error:
+                error_msg = f"Hacker News scraping failed: {str(scrape_error)}"
                 results["errors"].append(error_msg)
                 print(error_msg)
 

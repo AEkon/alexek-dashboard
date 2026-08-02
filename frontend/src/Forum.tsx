@@ -52,7 +52,12 @@ const SOURCE_META: Record<string, { label: string; short: string; title: string 
   squarespace_seo: { label: 'SS', short: 'SS', title: 'Squarespace · SEO' },
   squarespace_code: { label: 'SS', short: 'SS', title: 'Squarespace · Customize with code' },
   reddit_squarespace: { label: 'RD', short: 'RD', title: 'Reddit r/squarespace' },
+  reddit_squarespace_help: { label: 'RD', short: 'RD', title: 'Reddit r/SquarespaceHelp' },
+  reddit_web_design: { label: 'RD', short: 'RD', title: 'Reddit r/web_design' },
   stackoverflow: { label: 'SO', short: 'SO', title: 'Stack Overflow' },
+  webmasters: { label: 'WM', short: 'WM', title: 'Webmasters SE' },
+  superuser: { label: 'SU', short: 'SU', title: 'Super User' },
+  hackernews: { label: 'HN', short: 'HN', title: 'Hacker News' },
 }
 
 function sourceMeta(source: string) {
@@ -70,6 +75,9 @@ function sourceIconClass(source: string): string {
   if (source.startsWith('squarespace')) return 'source-icon source-icon--squarespace'
   if (source.startsWith('reddit')) return 'source-icon source-icon--reddit'
   if (source === 'stackoverflow') return 'source-icon source-icon--stackoverflow'
+  if (source === 'webmasters' || source === 'superuser') return 'source-icon source-icon--stackoverflow'
+  if (source.startsWith('discourse')) return 'source-icon source-icon--discourse'
+  if (source === 'hackernews') return 'source-icon source-icon--hackernews'
   return `source-icon source-icon--${source}`
 }
 
